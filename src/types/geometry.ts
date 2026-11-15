@@ -38,18 +38,64 @@ export interface GridConfig {
 export type ViewMode = 'paint' | 'laser';
 
 export type PresetId =
-  | 'heart'
+  | 'flower'
+  | 'flower-4'
+  | 'flower-5'
+  | 'flower-8'
+  | 'flower-lotus'
+  | 'flower-sun'
+  | 'flower-tulip'
   | 'petal'
   | 'heart-petal'
+  | 'petal-pointed'
+  | 'petal-layered'
   | 'leaf'
+  | 'leaf-branch'
   | 'paisley'
-  | 'flower'
+  | 'heart'
   | 'star'
-  | 'arrow'
+  | 'star-8'
   | 'diamond'
   | 'crescent'
   | 'spiral'
-  | 'arch';
+  | 'arch'
+  | 'butterfly'
+  | 'clover'
+  | 'crown'
+  | 'drop'
+  | 'arrow';
+
+export type TessellationId =
+  | 'squares'
+  | 'triangles'
+  | 'hexagons'
+  | 'octagons-squares'
+  | 'kagome'
+  | 'dodecagons-triangles'
+  | 'snub-square'
+  | 'rhombitrihexagonal'
+  | 'great-rhombitrihexagonal'
+  | 'cairo-pentagons'
+  | 'isometric-rhombus';
+
+export interface TessellationTile {
+  /** Closed polygon vertices in local math coords (cm, centered around 0,0) */
+  points: Point2D[];
+  /** Polygon role/type label for coloring (e.g. 'hex', 'tri', 'sq', 'oct') */
+  role: string;
+  /** Default pastel paint color for this tile */
+  fillColor: string;
+}
+
+export interface TessellationSpec {
+  id: TessellationId;
+  widthCm: number;
+  heightCm: number;
+  cellSizeCm: number;
+  includeBorder: boolean;
+  autoColor: boolean;
+  tiles: TessellationTile[];
+}
 
 export type ShapeKind =
   | 'freehand'
@@ -58,7 +104,8 @@ export type ShapeKind =
   | 'circle'
   | 'ellipse'
   | 'polygon'
-  | 'preset';
+  | 'preset'
+  | 'tessellation';
 
 export interface ShapeDerivedFrom {
   transformId: string;
@@ -79,6 +126,8 @@ export interface DesignShape {
   sides?: number;
   /** For 'preset': preset identifier */
   presetId?: PresetId;
+  /** For 'tessellation': clipped polygon tiles & spec */
+  tessellation?: TessellationSpec;
   /** Transform matrix from local space (cm) to math board space (cm) */
   matrix: Matrix2D;
   /** Preview paint fill color ('none' = transparent) */

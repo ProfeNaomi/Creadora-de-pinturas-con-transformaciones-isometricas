@@ -71,10 +71,10 @@ export const TopBar: React.FC<TopBarProps> = ({
         </div>
         <div className="leading-tight hidden sm:block">
           <h1 className="text-sm font-bold text-slate-900 tracking-tight truncate">
-            Taller Isométrico
+            Taller de Transformación Isométrica
           </h1>
-          <p className="text-[11px] text-slate-500 truncate">
-            Arte, Simetrías y Corte Láser
+          <p className="text-[11px] text-slate-500 font-medium truncate">
+            Profesora Naomi Urrea
           </p>
         </div>
       </div>

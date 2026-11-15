@@ -1,6 +1,7 @@
 import { BoardConfig, DesignShape } from '../types/geometry';
 import { applyMatrix, mathToSvgMm, roundCoord, transformMathPath } from './math2d';
 import { getShapeLocalPaths, isShapeFillable } from './presets';
+import { buildDeduplicatedTessellationLaserPaths } from './tessellations';
 
 export function buildBoardBorderSvgPaths(board: BoardConfig): string[] {
   const w = board.widthCm * 10;
@@ -80,6 +81,19 @@ export function buildLaserSvgString(board: BoardConfig, shapes: DesignShape[]): 
       continue;
     }
 
+    if (shape.kind === 'tessellation' && shape.tessellation) {
+      const segs = buildDeduplicatedTessellationLaserPaths(
+        shape.tessellation,
+        shape.matrix,
+        board.widthCm,
+        board.heightCm
+      );
+      if (segs.length > 0) {
+        engravingElements.push(`    <path d="${segs.join(' ')}" />`);
+      }
+      continue;
+    }
+
     const localPaths = getShapeLocalPaths(shape);
     for (const d of localPaths) {
       const { svgD } = transformMathPath(d, shape.matrix, board.widthCm, board.heightCm);
@@ -94,7 +108,7 @@ export function buildLaserSvgString(board: BoardConfig, shapes: DesignShape[]): 
   return [
     `<?xml version="1.0" encoding="UTF-8"?>`,
     `<svg xmlns="http://www.w3.org/2000/svg" width="${wMm}mm" height="${hMm}mm" viewBox="0 0 ${wMm} ${hMm}">`,
-    `  <!-- Creado con Creadora de Pinturas Isométricas -->`,
+    `  <!-- Creado con Taller de Transformación Isométrica — Profesora Naomi Urrea -->`,
     `  <!-- GRABADO_INTERIOR: Trazos negros (#000000) para marcar/grabar sobre madera -->`,
     `  <g id="GRABADO_INTERIOR" fill="none" stroke="#000000" stroke-width="0.25" stroke-linecap="round" stroke-linejoin="round">`,
     ...engravingElements,
@@ -125,6 +139,51 @@ export function buildPaintPreviewSvgString(board: BoardConfig, shapes: DesignSha
         const sp = mathToSvgMm(mp, board.widthCm, board.heightCm);
         elements.push(
           `    <circle cx="${sp.x}" cy="${sp.y}" r="${scaledRMm}" fill="#111827" stroke="none" />`
+        );
+      }
+      continue;
+    }
+
+    if (shape.kind === 'tessellation' && shape.tessellation) {
+      for (const tile of shape.tessellation.tiles) {
+        const d =
+          tile.points
+            .map((pt, idx) => {
+              const sp = mathToSvgMm(
+                applyMatrix(shape.matrix, pt),
+                board.widthCm,
+                board.heightCm
+              );
+              return `${idx === 0 ? 'M' : 'L'} ${sp.x} ${sp.y}`;
+            })
+            .join(' ') + ' Z';
+        const fill = shape.tessellation.autoColor ? tile.fillColor : 'none';
+        elements.push(
+          `    <path d="${d}" fill="${fill}" fill-opacity="0.72" stroke="#111827" stroke-width="${shape.strokeWidthMm}" />`
+        );
+      }
+      if (shape.tessellation.includeBorder) {
+        const hw = shape.tessellation.widthCm / 2;
+        const hh = shape.tessellation.heightCm / 2;
+        const borderPts = [
+          { x: -hw, y: -hh },
+          { x: hw, y: -hh },
+          { x: hw, y: hh },
+          { x: -hw, y: hh },
+        ];
+        const bd =
+          borderPts
+            .map((pt, idx) => {
+              const sp = mathToSvgMm(
+                applyMatrix(shape.matrix, pt),
+                board.widthCm,
+                board.heightCm
+              );
+              return `${idx === 0 ? 'M' : 'L'} ${sp.x} ${sp.y}`;
+            })
+            .join(' ') + ' Z';
+        elements.push(
+          `    <path d="${bd}" fill="none" stroke="#111827" stroke-width="${shape.strokeWidthMm}" />`
         );
       }
       continue;

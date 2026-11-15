@@ -8,6 +8,7 @@ import {
   FlipHorizontal2,
   Hand,
   Hexagon,
+  LayoutGrid,
   Minus,
   MousePointer2,
   Move,
@@ -20,7 +21,7 @@ import {
   Sparkles,
 } from 'lucide-react';
 import { PresetId, ToolId } from '../types/geometry';
-import { PRESET_LIST } from '../utils/presets';
+import { PRESET_LIST, PresetCategory } from '../utils/presets';
 
 interface LeftToolbarProps {
   activeTool: ToolId;
@@ -30,6 +31,7 @@ interface LeftToolbarProps {
   polygonSides: number;
   onChangePolygonSides: (sides: number) => void;
   onQuickAddAxis: (kind: 'x' | 'y' | 'diag1' | 'diag2' | 'origin') => void;
+  onOpenTessellations: () => void;
 }
 
 interface ToolButtonProps {
@@ -38,7 +40,7 @@ interface ToolButtonProps {
   icon: React.ReactNode;
   label: string;
   title: string;
-  accent?: 'indigo' | 'amber' | 'emerald' | 'rose';
+  accent?: 'indigo' | 'amber' | 'emerald' | 'rose' | 'violet';
 }
 
 const ToolButton: React.FC<ToolButtonProps> = ({
@@ -54,6 +56,7 @@ const ToolButton: React.FC<ToolButtonProps> = ({
     amber: 'bg-amber-500 text-white shadow-xs',
     emerald: 'bg-emerald-600 text-white shadow-xs',
     rose: 'bg-rose-600 text-white shadow-xs',
+    violet: 'bg-violet-600 text-white shadow-xs',
   }[accent];
 
   return (
@@ -81,13 +84,20 @@ export const LeftToolbar: React.FC<LeftToolbarProps> = ({
   polygonSides,
   onChangePolygonSides,
   onQuickAddAxis,
+  onOpenTessellations,
 }) => {
   const [showPresets, setShowPresets] = useState(false);
+  const [presetCat, setPresetCat] = useState<'all' | PresetCategory>('all');
   const [showPolygonMenu, setShowPolygonMenu] = useState(false);
   const [showQuickAxes, setShowQuickAxes] = useState(false);
 
+  const visiblePresets =
+    presetCat === 'all'
+      ? PRESET_LIST
+      : PRESET_LIST.filter((p) => p.category === presetCat);
+
   return (
-    <aside className="w-[74px] bg-white border-r border-slate-200 flex flex-col py-2 px-1.5 gap-2 overflow-y-auto custom-scrollbar shrink-0 z-10 relative">
+    <aside className="w-[78px] bg-white border-r border-slate-200 flex flex-col py-2 px-1.5 gap-2 overflow-y-auto custom-scrollbar shrink-0 z-10 relative">
       {/* Navigation & Edit */}
       <div className="flex flex-col gap-1">
         <div className="text-[9px] font-bold uppercase tracking-wider text-slate-400 text-center">
@@ -174,12 +184,12 @@ export const LeftToolbar: React.FC<LeftToolbarProps> = ({
             title="Polígono regular (clic para elegir cantidad de lados)"
           />
           {showPolygonMenu && (
-            <div className="fixed left-[78px] top-60 bg-white border border-slate-200 rounded-xl shadow-lg p-2.5 z-50 w-44">
+            <div className="fixed left-[82px] top-60 bg-white border border-slate-200 rounded-xl shadow-lg p-2.5 z-50 w-44">
               <div className="text-xs font-semibold text-slate-800 mb-1.5">
                 Lados del polígono
               </div>
               <div className="grid grid-cols-3 gap-1">
-                {[3, 4, 5, 6, 8, 10].map((n) => (
+                {[3, 4, 5, 6, 7, 8, 10, 12].map((n) => (
                   <button
                     key={n}
                     type="button"
@@ -213,27 +223,52 @@ export const LeftToolbar: React.FC<LeftToolbarProps> = ({
             }}
             icon={<Shapes className="w-4 h-4" />}
             label="Formas"
-            title="Estampas y formas artísticas listas para colocar"
+            title="Flores, pétalos, hojas y figuras artísticas (26 motivos)"
           />
           {showPresets && (
-            <div className="fixed left-[78px] top-40 bg-white border border-slate-200 rounded-xl shadow-xl p-3 z-50 w-72">
+            <div className="fixed left-[82px] top-20 bg-white border border-slate-200 rounded-xl shadow-2xl p-3 z-50 w-[340px]">
               <div className="flex items-center justify-between mb-2">
                 <span className="text-xs font-bold text-slate-800">
-                  Formas Predeterminadas
+                  Biblioteca de Formas ({PRESET_LIST.length})
                 </span>
                 <button
                   type="button"
                   onClick={() => setShowPresets(false)}
-                  className="text-[11px] text-slate-400 hover:text-slate-700"
+                  className="text-[11px] text-slate-400 hover:text-slate-700 cursor-pointer"
                 >
                   Cerrar
                 </button>
               </div>
+
+              <div className="flex flex-wrap gap-1 mb-2">
+                {(
+                  [
+                    { id: 'all', label: 'Todas' },
+                    { id: 'flores', label: 'Flores' },
+                    { id: 'petalos', label: 'Pétalos/Hojas' },
+                    { id: 'figuras', label: 'Figuras' },
+                  ] as const
+                ).map((cat) => (
+                  <button
+                    key={cat.id}
+                    type="button"
+                    onClick={() => setPresetCat(cat.id)}
+                    className={`px-2 py-0.5 rounded-md text-[10px] font-semibold cursor-pointer border transition ${
+                      presetCat === cat.id
+                        ? 'bg-indigo-600 text-white border-indigo-600'
+                        : 'bg-slate-50 text-slate-600 border-slate-200 hover:bg-slate-100'
+                    }`}
+                  >
+                    {cat.label}
+                  </button>
+                ))}
+              </div>
+
               <p className="text-[11px] text-slate-500 mb-2">
                 Elige una figura y haz clic en el lienzo para colocarla:
               </p>
-              <div className="grid grid-cols-3 gap-1.5 max-h-72 overflow-y-auto custom-scrollbar pr-0.5">
-                {PRESET_LIST.map((preset) => (
+              <div className="grid grid-cols-4 gap-1.5 max-h-80 overflow-y-auto custom-scrollbar pr-0.5">
+                {visiblePresets.map((preset) => (
                   <button
                     key={preset.id}
                     type="button"
@@ -242,7 +277,7 @@ export const LeftToolbar: React.FC<LeftToolbarProps> = ({
                       onSelectTool('preset');
                       setShowPresets(false);
                     }}
-                    className={`p-2 rounded-lg border flex flex-col items-center gap-1 transition cursor-pointer ${
+                    className={`p-1.5 rounded-lg border flex flex-col items-center gap-1 transition cursor-pointer ${
                       activePreset === preset.id && activeTool === 'preset'
                         ? 'border-indigo-500 bg-indigo-50 text-indigo-700'
                         : 'border-slate-200 hover:border-indigo-300 hover:bg-slate-50 text-slate-700'
@@ -260,14 +295,14 @@ export const LeftToolbar: React.FC<LeftToolbarProps> = ({
                                 : 'none'
                             }
                             stroke="currentColor"
-                            strokeWidth="0.16"
+                            strokeWidth="0.14"
                             strokeLinecap="round"
                             strokeLinejoin="round"
                           />
                         ))}
                       </g>
                     </svg>
-                    <span className="text-[10px] font-medium leading-tight text-center">
+                    <span className="text-[9px] font-medium leading-tight text-center">
                       {preset.label}
                     </span>
                   </button>
@@ -276,6 +311,21 @@ export const LeftToolbar: React.FC<LeftToolbarProps> = ({
             </div>
           )}
         </div>
+
+        {/* Tessellations Button */}
+        <ToolButton
+          active={false}
+          onClick={() => {
+            setShowPresets(false);
+            setShowPolygonMenu(false);
+            setShowQuickAxes(false);
+            onOpenTessellations();
+          }}
+          icon={<LayoutGrid className="w-4 h-4 text-violet-600" />}
+          label="Teselar"
+          title="Teselaciones: crear patrones geométricos combinados (360°) dentro de un área específica"
+          accent="violet"
+        />
       </div>
 
       <div className="h-px bg-slate-200 mx-1" />
@@ -323,7 +373,7 @@ export const LeftToolbar: React.FC<LeftToolbarProps> = ({
             + Ejes
           </button>
           {showQuickAxes && (
-            <div className="fixed left-[78px] bottom-28 bg-white border border-slate-200 rounded-xl shadow-xl p-2.5 z-50 w-48">
+            <div className="fixed left-[82px] bottom-28 bg-white border border-slate-200 rounded-xl shadow-xl p-2.5 z-50 w-48">
               <div className="text-xs font-bold text-slate-800 mb-1.5">
                 Agregar guía rápida
               </div>

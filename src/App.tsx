@@ -3,6 +3,7 @@ import { CanvasWorkspace } from './components/CanvasWorkspace';
 import { HelpModal } from './components/HelpModal';
 import { LeftToolbar } from './components/LeftToolbar';
 import { RightPanel } from './components/RightPanel';
+import { TessellationModal } from './components/TessellationModal';
 import { TopBar } from './components/TopBar';
 import {
   BoardConfig,
@@ -17,6 +18,7 @@ import {
   RefPoint,
   RefVector,
   SavedProjectFile,
+  TessellationSpec,
   ToolId,
   TransformParams,
   TransformRecord,
@@ -82,6 +84,7 @@ const SHAPE_NAMES: Record<DesignShape['kind'], string> = {
   ellipse: 'Óvalo',
   polygon: 'Polígono',
   preset: 'Figura',
+  tessellation: 'Teselación',
 };
 
 export function App() {
@@ -102,6 +105,7 @@ export function App() {
   const [selectedRefId, setSelectedRefId] = useState<string | null>(null);
   const [clipboard, setClipboard] = useState<DesignShape[]>([]);
   const [helpOpen, setHelpOpen] = useState(false);
+  const [tessellationOpen, setTessellationOpen] = useState(false);
 
   const countersRef = useRef({
     shape: 1,
@@ -936,6 +940,34 @@ export function App() {
     }
   };
 
+  const handleInsertTessellation = useCallback(
+    (
+      spec: TessellationSpec,
+      centerX: number,
+      centerY: number,
+      displayName: string
+    ) => {
+      const newShape: DesignShape = {
+        id: uid('sh'),
+        name: displayName,
+        kind: 'tessellation',
+        tessellation: spec,
+        matrix: translationMatrix(centerX, centerY),
+        fillColor: 'none',
+        strokeWidthMm: 0.3,
+        visible: true,
+      };
+      commitState((prev) => ({
+        ...prev,
+        shapes: [...prev.shapes, newShape],
+      }));
+      setSelectedShapeIds([newShape.id]);
+      setSelectedRefId(null);
+      setActiveTool('select');
+    },
+    [commitState]
+  );
+
   const handleClearAll = () => {
     if (
       snapshot.shapes.length === 0 &&
@@ -979,6 +1011,7 @@ export function App() {
           polygonSides={polygonSides}
           onChangePolygonSides={setPolygonSides}
           onQuickAddAxis={handleQuickAddAxis}
+          onOpenTessellations={() => setTessellationOpen(true)}
         />
 
         <CanvasWorkspace
@@ -1064,6 +1097,12 @@ export function App() {
       </div>
 
       <HelpModal open={helpOpen} onClose={() => setHelpOpen(false)} />
+      <TessellationModal
+        open={tessellationOpen}
+        board={board}
+        onClose={() => setTessellationOpen(false)}
+        onInsert={handleInsertTessellation}
+      />
     </div>
   );
 }

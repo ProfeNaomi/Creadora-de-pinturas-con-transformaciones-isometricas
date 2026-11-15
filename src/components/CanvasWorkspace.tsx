@@ -1530,6 +1530,68 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
               );
             }
 
+            if (shape.kind === 'tessellation' && shape.tessellation) {
+              const strokeColor = isWizSrc
+                ? '#059669'
+                : isSel && activeTool === 'select'
+                  ? '#1d4ed8'
+                  : '#000000';
+              const sw = Math.max(shape.strokeWidthMm, 1.3 * strokeScale);
+              const showTessPaint =
+                viewMode === 'paint' && shape.tessellation.autoColor;
+              const hw = shape.tessellation.widthCm / 2;
+              const hh = shape.tessellation.heightCm / 2;
+              const borderPts = [
+                { x: -hw, y: -hh },
+                { x: hw, y: -hh },
+                { x: hw, y: hh },
+                { x: -hw, y: hh },
+              ].map((pt) =>
+                mathToSvgMm(
+                  applyMatrix(shape.matrix, pt),
+                  board.widthCm,
+                  board.heightCm
+                )
+              );
+
+              return (
+                <g key={shape.id}>
+                  {shape.tessellation.tiles.map((tile, idx) => {
+                    const ptsStr = tile.points
+                      .map((pt) => {
+                        const sp = mathToSvgMm(
+                          applyMatrix(shape.matrix, pt),
+                          board.widthCm,
+                          board.heightCm
+                        );
+                        return `${sp.x},${sp.y}`;
+                      })
+                      .join(' ');
+                    return (
+                      <polygon
+                        key={idx}
+                        points={ptsStr}
+                        fill={showTessPaint ? tile.fillColor : 'none'}
+                        fillOpacity={0.72}
+                        stroke={strokeColor}
+                        strokeWidth={sw}
+                        strokeLinejoin="round"
+                      />
+                    );
+                  })}
+                  {shape.tessellation.includeBorder && (
+                    <polygon
+                      points={borderPts.map((p) => `${p.x},${p.y}`).join(' ')}
+                      fill="none"
+                      stroke={strokeColor}
+                      strokeWidth={sw * 1.25}
+                      strokeLinejoin="round"
+                    />
+                  )}
+                </g>
+              );
+            }
+
             const localPaths = getShapeLocalPaths(shape);
             const showPaint =
               viewMode === 'paint' &&
