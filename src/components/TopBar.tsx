@@ -2,18 +2,23 @@ import React, { useRef } from 'react';
 import {
   Download,
   Eye,
+  FileCode2,
   FileDown,
   FileUp,
+  Flame,
   HelpCircle,
   Image as ImageIcon,
+  Palette,
   Redo2,
   Scissors,
   Sparkles,
   Undo2,
 } from 'lucide-react';
-import { BoardConfig, BorderShape, ViewMode } from '../types/geometry';
+import { AppMode, BoardConfig, BorderShape, ViewMode } from '../types/geometry';
 
 interface TopBarProps {
+  appMode: AppMode;
+  onChangeAppMode: (mode: AppMode) => void;
   board: BoardConfig;
   onChangeBoard: (next: BoardConfig) => void;
   viewMode: ViewMode;
@@ -23,6 +28,7 @@ interface TopBarProps {
   onUndo: () => void;
   onRedo: () => void;
   onExportLaserSvg: () => void;
+  onExportLaserDxf: () => void;
   onExportPaintPng: () => void;
   onSaveProject: () => void;
   onLoadProject: (file: File) => void;
@@ -39,6 +45,8 @@ const SIZE_PRESETS = [
 ];
 
 export const TopBar: React.FC<TopBarProps> = ({
+  appMode,
+  onChangeAppMode,
   board,
   onChangeBoard,
   viewMode,
@@ -48,6 +56,7 @@ export const TopBar: React.FC<TopBarProps> = ({
   onUndo,
   onRedo,
   onExportLaserSvg,
+  onExportLaserDxf,
   onExportPaintPng,
   onSaveProject,
   onLoadProject,
@@ -165,33 +174,65 @@ export const TopBar: React.FC<TopBarProps> = ({
         </label>
       </div>
 
-      {/* View Mode Switch */}
-      <div className="flex items-center bg-slate-100 p-0.5 rounded-lg border border-slate-200">
+      {/* Main 2-Mode Switcher */}
+      <div className="flex items-center bg-slate-900/5 p-0.5 rounded-xl border border-slate-300/80">
         <button
-          onClick={() => onChangeViewMode('paint')}
-          className={`px-2.5 py-1 rounded-md text-xs font-medium flex items-center gap-1.5 transition ${
-            viewMode === 'paint'
-              ? 'bg-white text-indigo-700 shadow-xs'
+          type="button"
+          onClick={() => onChangeAppMode('design')}
+          className={`px-2.5 py-1 rounded-lg text-xs font-bold flex items-center gap-1.5 transition cursor-pointer ${
+            appMode === 'design'
+              ? 'bg-indigo-600 text-white shadow-xs'
               : 'text-slate-600 hover:text-slate-900'
           }`}
-          title="Muestra colores de relleno para imaginar tu pintura"
+          title="Modo 1: Dibujar, teselar y aplicar transformaciones isométricas"
         >
-          <Eye className="w-3.5 h-3.5" />
-          <span className="hidden md:inline">Vista Pintura</span>
+          <Palette className="w-3.5 h-3.5" />
+          <span>1. Diseño</span>
         </button>
         <button
-          onClick={() => onChangeViewMode('laser')}
-          className={`px-2.5 py-1 rounded-md text-xs font-medium flex items-center gap-1.5 transition ${
-            viewMode === 'laser'
-              ? 'bg-white text-rose-700 shadow-xs'
+          type="button"
+          onClick={() => onChangeAppMode('laser-prep')}
+          className={`px-2.5 py-1 rounded-lg text-xs font-bold flex items-center gap-1.5 transition cursor-pointer ${
+            appMode === 'laser-prep'
+              ? 'bg-orange-600 text-white shadow-xs'
               : 'text-slate-600 hover:text-slate-900'
           }`}
-          title="Muestra exactamente qué se corta (rojo) y qué se graba (negro)"
+          title="Modo 2: Clasificar profundidades de corte/grabado para CR-Laser Falcon 10W"
         >
-          <Scissors className="w-3.5 h-3.5" />
-          <span className="hidden md:inline">Vista Láser</span>
+          <Flame className="w-3.5 h-3.5" />
+          <span>2. Profundidad Láser</span>
         </button>
       </div>
+
+      {/* View Mode Switch (only in Design mode) */}
+      {appMode === 'design' && (
+        <div className="hidden 2xl:flex items-center bg-slate-100 p-0.5 rounded-lg border border-slate-200">
+          <button
+            onClick={() => onChangeViewMode('paint')}
+            className={`px-2 py-1 rounded-md text-xs font-medium flex items-center gap-1 transition cursor-pointer ${
+              viewMode === 'paint'
+                ? 'bg-white text-indigo-700 shadow-xs'
+                : 'text-slate-600 hover:text-slate-900'
+            }`}
+            title="Muestra colores de relleno para imaginar tu pintura"
+          >
+            <Eye className="w-3.5 h-3.5" />
+            <span>Pintura</span>
+          </button>
+          <button
+            onClick={() => onChangeViewMode('laser')}
+            className={`px-2 py-1 rounded-md text-xs font-medium flex items-center gap-1 transition cursor-pointer ${
+              viewMode === 'laser'
+                ? 'bg-white text-rose-700 shadow-xs'
+                : 'text-slate-600 hover:text-slate-900'
+            }`}
+            title="Muestra los trazos en negro y corte rojo"
+          >
+            <Scissors className="w-3.5 h-3.5" />
+            <span>Láser</span>
+          </button>
+        </div>
+      )}
 
       {/* Actions */}
       <div className="flex items-center gap-1.5">
@@ -256,11 +297,20 @@ export const TopBar: React.FC<TopBarProps> = ({
 
         <button
           onClick={onExportLaserSvg}
-          className="px-3 py-1.5 text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-700 rounded-lg flex items-center gap-1.5 shadow-xs transition cursor-pointer"
-          title="Exportar archivo SVG en milímetros listo para cortadora láser (Rojo = Corte borde, Negro = Grabado)"
+          className="px-2.5 py-1.5 text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-700 rounded-lg flex items-center gap-1 shadow-xs transition cursor-pointer"
+          title="Exportar archivo SVG multi-capa para Falcon Design Space"
         >
           <Download className="w-3.5 h-3.5" />
-          <span>SVG Láser</span>
+          <span>SVG</span>
+        </button>
+
+        <button
+          onClick={onExportLaserDxf}
+          className="px-2.5 py-1.5 text-xs font-semibold text-white bg-slate-800 hover:bg-slate-900 rounded-lg flex items-center gap-1 shadow-xs transition cursor-pointer"
+          title="Exportar archivo DXF estándar (CorelDRAW normal y Falcon Design Space)"
+        >
+          <FileCode2 className="w-3.5 h-3.5" />
+          <span>DXF</span>
         </button>
 
         <button

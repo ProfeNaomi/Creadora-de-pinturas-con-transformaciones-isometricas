@@ -37,6 +37,22 @@ export interface GridConfig {
 
 export type ViewMode = 'paint' | 'laser';
 
+export type AppMode = 'design' | 'laser-prep';
+
+export type LaserDepthId =
+  | 'engrave-fill'
+  | 'score-light'
+  | 'engrave-medium'
+  | 'engrave-deep'
+  | 'cut-inner'
+  | 'cut-border';
+
+export type MaterialPresetId =
+  | 'plywood-3mm'
+  | 'mdf-3mm'
+  | 'softwood-3mm'
+  | 'cardboard';
+
 export type PresetId =
   | 'flower'
   | 'flower-4'
@@ -95,6 +111,10 @@ export interface TessellationSpec {
   includeBorder: boolean;
   autoColor: boolean;
   tiles: TessellationTile[];
+  /** Optional per-role laser depth override in Laser Depth Mode */
+  roleLaserLayers?: Record<string, LaserDepthId>;
+  /** Optional laser depth for the outer rectangular border of the tessellation */
+  borderLaserLayer?: LaserDepthId;
 }
 
 export type ShapeKind =
@@ -134,6 +154,8 @@ export interface DesignShape {
   fillColor: string;
   /** Visual stroke width in mm (used in UI & laser export defaults) */
   strokeWidthMm: number;
+  /** Laser depth classification for Falcon Design Space / DXF / SVG export */
+  laserLayer?: LaserDepthId;
   visible: boolean;
   locked?: boolean;
   /** If created by an isometric transformation, links back to the TransformRecord */

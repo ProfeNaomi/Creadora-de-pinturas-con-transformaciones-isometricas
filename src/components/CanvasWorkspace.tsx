@@ -1,9 +1,11 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Maximize2, ZoomIn, ZoomOut } from 'lucide-react';
 import {
+  AppMode,
   BoardConfig,
   DesignShape,
   GridConfig,
+  LaserDepthId,
   Matrix2D,
   Point2D,
   PresetId,
@@ -15,6 +17,9 @@ import {
   TransformParams,
   ViewMode,
 } from '../types/geometry';
+import { getShapeLaserLayer, LASER_LAYER_MAP } from '../utils/laserLayers';
+import type { LaserPreviewStyle } from './LaserDepthPanel';
+import type { LaserToolMode } from './LaserLeftToolbar';
 import {
   applyMatrix,
   BoundingBox,
@@ -48,6 +53,11 @@ import {
 import { buildBoardBorderSvgPaths } from '../utils/svgExport';
 
 interface CanvasWorkspaceProps {
+  appMode?: AppMode;
+  laserTool?: LaserToolMode;
+  activeBrushLayer?: LaserDepthId;
+  laserPreviewStyle?: LaserPreviewStyle;
+  onAssignLayerToShapes?: (ids: string[], layer: LaserDepthId) => void;
   board: BoardConfig;
   grid: GridConfig;
   viewMode: ViewMode;
@@ -132,6 +142,11 @@ const isTransformTool = (
   t === 't-translation';
 
 export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
+  appMode = 'design',
+  laserTool = 'select',
+  activeBrushLayer = 'engrave-deep',
+  laserPreviewStyle = 'layers',
+  onAssignLayerToShapes,
   board,
   grid,
   viewMode,
@@ -380,7 +395,12 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     setSnappedCursor(snap);
 
     // Middle mouse button or Pan tool or Spacebar -> Pan
-    if (e.button === 1 || activeTool === 'pan' || spacePressed) {
+    if (
+      e.button === 1 ||
+      activeTool === 'pan' ||
+      (appMode === 'laser-prep' && laserTool === 'pan') ||
+      spacePressed
+    ) {
       setDrag({
         kind: 'pan',
         startClientX: e.clientX,
@@ -392,6 +412,31 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     }
 
     if (e.button !== 0) return;
+
+    // Mode 2: Laser Depth Classification clicks
+    if (appMode === 'laser-prep') {
+      const shapeHit = findShapeAt(rawMath);
+      if (laserTool === 'brush') {
+        if (shapeHit && onAssignLayerToShapes) {
+          onAssignLayerToShapes([shapeHit.id], activeBrushLayer);
+          onSelectShapes([shapeHit.id]);
+        }
+        return;
+      }
+      if (shapeHit) {
+        if (e.shiftKey) {
+          const nextSel = selectedShapeIds.includes(shapeHit.id)
+            ? selectedShapeIds.filter((id) => id !== shapeHit.id)
+            : [...selectedShapeIds, shapeHit.id];
+          onSelectShapes(nextSel);
+        } else {
+          onSelectShapes([shapeHit.id]);
+        }
+      } else {
+        onSelectShapes([]);
+      }
+      return;
+    }
 
     // Eraser tool
     if (activeTool === 'eraser') {
@@ -975,11 +1020,18 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   const strokeScale = mmPerPx; // 1 screen pixel in mm
 
   const cursorStyle =
-    drag?.kind === 'pan' || activeTool === 'pan' || spacePressed
+    drag?.kind === 'pan' ||
+    activeTool === 'pan' ||
+    (appMode === 'laser-prep' && laserTool === 'pan') ||
+    spacePressed
       ? 'grab'
-      : activeTool === 'select'
-        ? 'default'
-        : 'crosshair';
+      : appMode === 'laser-prep'
+        ? laserTool === 'brush'
+          ? 'crosshair'
+          : 'pointer'
+        : activeTool === 'select'
+          ? 'default'
+          : 'crosshair';
 
   // Helper to clip infinite RefLine to visible viewport box
   const getInfiniteLineEndpointsMm = (line: RefLine): [Point2D, Point2D] | null => {
@@ -1003,12 +1055,36 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       ref={containerRef}
       className="flex-1 relative bg-slate-200/80 overflow-hidden select-none"
     >
+      {/* Top Guidance Banner for Laser Prep Mode */}
+      {appMode === 'laser-prep' && (
+        <div className="absolute top-3 left-1/2 -translate-x-1/2 z-20 max-w-[92%] flex flex-wrap items-center justify-center gap-2 bg-white/95 backdrop-blur-xs border border-orange-200 shadow-lg rounded-xl px-3.5 py-2 text-xs">
+          <span className="font-bold text-orange-700 bg-orange-50 px-2 py-0.5 rounded-md border border-orange-200 text-[10px] uppercase">
+            Modo Profundidad Láser
+          </span>
+          {laserTool === 'brush' ? (
+            <span className="text-slate-700 font-medium flex items-center gap-1.5">
+              Pincel activo:{' '}
+              <span
+                className="inline-block w-2.5 h-2.5 rounded-full"
+                style={{ backgroundColor: LASER_LAYER_MAP[activeBrushLayer].color }}
+              />
+              <strong>{LASER_LAYER_MAP[activeBrushLayer].name}</strong> — Haz clic sobre cualquier figura para asignarle esta profundidad.
+            </span>
+          ) : (
+            <span className="text-slate-700 font-medium">
+              Haz clic en una figura (o usa Shift+clic / Pincel Láser) y elige su profundidad a la derecha.
+            </span>
+          )}
+        </div>
+      )}
+
       {/* Top Guidance Banner for Multi-Step Tools & Isometric Transformations */}
-      {(wizard ||
-        activeTool === 'ref-line' ||
-        activeTool === 'ref-vector' ||
-        activeTool === 'preset' ||
-        mirrorSymmetry > 1) && (
+      {appMode === 'design' &&
+        (wizard ||
+          activeTool === 'ref-line' ||
+          activeTool === 'ref-vector' ||
+          activeTool === 'preset' ||
+          mirrorSymmetry > 1) && (
         <div className="absolute top-3 left-1/2 -translate-x-1/2 z-20 max-w-[92%] flex flex-wrap items-center justify-center gap-2 bg-white/95 backdrop-blur-xs border border-slate-200 shadow-lg rounded-xl px-3.5 py-2 text-xs">
           {!wizard && activeTool === 'preset' && (
             <span className="text-slate-700 font-medium">
@@ -1349,6 +1425,15 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
               floodOpacity="0.14"
             />
           </filter>
+          <pattern id="wood-grain" width="60" height="60" patternUnits="userSpaceOnUse">
+            <rect width="60" height="60" fill="#f3dfc1" />
+            <path
+              d="M 0 10 Q 20 8 40 11 T 60 10 M 0 28 Q 25 31 50 27 T 60 28 M 0 46 Q 15 44 35 47 T 60 46"
+              fill="none"
+              stroke="#e5c89f"
+              strokeWidth="0.9"
+            />
+          </pattern>
         </defs>
 
         {/* Wooden / Paper Board Surface */}
@@ -1358,7 +1443,13 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
               cx={(board.widthCm * 10) / 2}
               cy={(board.heightCm * 10) / 2}
               r={(Math.min(board.widthCm, board.heightCm) * 10) / 2}
-              fill={viewMode === 'laser' ? '#ffffff' : '#fffdf9'}
+              fill={
+                appMode === 'laser-prep' && laserPreviewStyle === 'wood'
+                  ? 'url(#wood-grain)'
+                  : viewMode === 'laser' || appMode === 'laser-prep'
+                    ? '#ffffff'
+                    : '#fffdf9'
+              }
             />
           ) : (
             <rect
@@ -1367,13 +1458,19 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
               width={board.widthCm * 10}
               height={board.heightCm * 10}
               rx={board.borderShape === 'rounded' ? board.cornerRadiusCm * 10 : 0}
-              fill={viewMode === 'laser' ? '#ffffff' : '#fffdf9'}
+              fill={
+                appMode === 'laser-prep' && laserPreviewStyle === 'wood'
+                  ? 'url(#wood-grain)'
+                  : viewMode === 'laser' || appMode === 'laser-prep'
+                    ? '#ffffff'
+                    : '#fffdf9'
+              }
             />
           )}
         </g>
 
         {/* Adaptive Grid */}
-        {grid.showGrid && (
+        {grid.showGrid && appMode === 'design' && (
           <g pointerEvents="none">
             {gridElements.minorX.map((x) => {
               const sx = mathToSvgMm({ x, y: 0 }, board.widthCm, board.heightCm).x;
@@ -1441,7 +1538,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         )}
 
         {/* Axes when grid is off */}
-        {!grid.showGrid && grid.showAxes && (
+        {!grid.showGrid && grid.showAxes && appMode === 'design' && (
           <g pointerEvents="none">
             <line
               x1={mathToSvgMm({ x: 0, y: 0 }, board.widthCm, board.heightCm).x}
@@ -1463,7 +1560,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         )}
 
         {/* Axis numbers */}
-        {grid.showNumbers && grid.showAxes && (
+        {grid.showNumbers && grid.showAxes && appMode === 'design' && (
           <g pointerEvents="none" fill="#64748b" fontSize={10 * strokeScale} fontFamily="monospace">
             {gridElements.majorX
               .filter((x) => {
@@ -1502,12 +1599,23 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
             if (!shape.visible) return null;
             const isSel = selectedShapeIds.includes(shape.id);
             const isWizSrc = wizard?.sourceIds.includes(shape.id);
+            const shapeLayerId = getShapeLaserLayer(shape);
+            const layerDef = LASER_LAYER_MAP[shapeLayerId];
+            const isLaserPrep = appMode === 'laser-prep';
+            const isWood = isLaserPrep && laserPreviewStyle === 'wood';
 
             if (shape.kind === 'dots' && shape.localDots) {
               const rMm = (shape.dotRadiusCm ?? 0.08) * 10;
               const sx = Math.hypot(shape.matrix[0], shape.matrix[1]);
               const sy = Math.hypot(shape.matrix[2], shape.matrix[3]);
               const scaledRMm = Math.max(0.3, rMm * ((sx + sy) / 2));
+              const dotColor = isWizSrc
+                ? '#059669'
+                : isLaserPrep
+                  ? isWood
+                    ? layerDef.woodPreviewColor
+                    : layerDef.color
+                  : '#0f172a';
               return (
                 <g key={shape.id}>
                   {shape.localDots.map((dot, idx) => {
@@ -1522,7 +1630,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
                         cx={sp.x}
                         cy={sp.y}
                         r={scaledRMm}
-                        fill={isWizSrc ? '#059669' : '#0f172a'}
+                        fill={dotColor}
                       />
                     );
                   })}
@@ -1531,14 +1639,9 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
             }
 
             if (shape.kind === 'tessellation' && shape.tessellation) {
-              const strokeColor = isWizSrc
-                ? '#059669'
-                : isSel && activeTool === 'select'
-                  ? '#1d4ed8'
-                  : '#000000';
-              const sw = Math.max(shape.strokeWidthMm, 1.3 * strokeScale);
+              const baseSw = Math.max(shape.strokeWidthMm, 1.3 * strokeScale);
               const showTessPaint =
-                viewMode === 'paint' && shape.tessellation.autoColor;
+                !isLaserPrep && viewMode === 'paint' && shape.tessellation.autoColor;
               const hw = shape.tessellation.widthCm / 2;
               const hh = shape.tessellation.heightCm / 2;
               const borderPts = [
@@ -1567,37 +1670,95 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
                         return `${sp.x},${sp.y}`;
                       })
                       .join(' ');
+                    const roleLayerId =
+                      shape.tessellation?.roleLaserLayers?.[tile.role] ?? shapeLayerId;
+                    const roleDef = LASER_LAYER_MAP[roleLayerId];
+                    const tileStroke = isWizSrc
+                      ? '#059669'
+                      : isLaserPrep
+                        ? isWood
+                          ? roleDef.woodPreviewColor
+                          : roleDef.color
+                        : isSel && activeTool === 'select'
+                          ? '#1d4ed8'
+                          : '#000000';
+                    const tileFill = isLaserPrep
+                      ? roleLayerId === 'engrave-fill'
+                        ? isWood
+                          ? roleDef.woodPreviewColor
+                          : roleDef.color
+                        : 'none'
+                      : showTessPaint
+                        ? tile.fillColor
+                        : 'none';
+                    const tileSw = isLaserPrep
+                      ? baseSw * roleDef.woodStrokeWidthFactor
+                      : baseSw;
+
                     return (
                       <polygon
                         key={idx}
                         points={ptsStr}
-                        fill={showTessPaint ? tile.fillColor : 'none'}
-                        fillOpacity={0.72}
-                        stroke={strokeColor}
-                        strokeWidth={sw}
+                        fill={tileFill}
+                        fillOpacity={isLaserPrep ? (isWood ? 0.85 : 0.78) : 0.72}
+                        stroke={tileStroke}
+                        strokeWidth={tileSw}
                         strokeLinejoin="round"
                       />
                     );
                   })}
-                  {shape.tessellation.includeBorder && (
-                    <polygon
-                      points={borderPts.map((p) => `${p.x},${p.y}`).join(' ')}
-                      fill="none"
-                      stroke={strokeColor}
-                      strokeWidth={sw * 1.25}
-                      strokeLinejoin="round"
-                    />
-                  )}
+                  {shape.tessellation.includeBorder && (() => {
+                    const bLayerId =
+                      shape.tessellation?.borderLaserLayer ?? shapeLayerId;
+                    const bDef = LASER_LAYER_MAP[bLayerId];
+                    const bStroke = isWizSrc
+                      ? '#059669'
+                      : isLaserPrep
+                        ? isWood
+                          ? bDef.woodPreviewColor
+                          : bDef.color
+                        : isSel && activeTool === 'select'
+                          ? '#1d4ed8'
+                          : '#000000';
+                    return (
+                      <polygon
+                        points={borderPts.map((p) => `${p.x},${p.y}`).join(' ')}
+                        fill="none"
+                        stroke={bStroke}
+                        strokeWidth={
+                          isLaserPrep
+                            ? baseSw * bDef.woodStrokeWidthFactor
+                            : baseSw * 1.25
+                        }
+                        strokeLinejoin="round"
+                      />
+                    );
+                  })()}
                 </g>
               );
             }
 
             const localPaths = getShapeLocalPaths(shape);
             const showPaint =
+              !isLaserPrep &&
               viewMode === 'paint' &&
               isShapeFillable(shape) &&
               shape.fillColor &&
               shape.fillColor !== 'none';
+            const isLayerFill = isLaserPrep && shapeLayerId === 'engrave-fill';
+            const strokeColor = isWizSrc
+              ? '#059669'
+              : isLaserPrep
+                ? isWood
+                  ? layerDef.woodPreviewColor
+                  : layerDef.color
+                : isSel && activeTool === 'select'
+                  ? '#1d4ed8'
+                  : '#000000';
+            const sw = isLaserPrep
+              ? Math.max(shape.strokeWidthMm, 1.4 * strokeScale) *
+                layerDef.woodStrokeWidthFactor
+              : Math.max(shape.strokeWidthMm, 1.4 * strokeScale);
 
             return (
               <g key={shape.id}>
@@ -1609,20 +1770,24 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
                     board.heightCm
                   );
                   if (!svgD) return null;
+                  const isClosed = d.trim().toUpperCase().endsWith('Z');
+                  const fill = isLayerFill
+                    ? isClosed
+                      ? isWood
+                        ? layerDef.woodPreviewColor
+                        : layerDef.color
+                      : 'none'
+                    : showPaint && idx === 0
+                      ? shape.fillColor
+                      : 'none';
                   return (
                     <path
                       key={idx}
                       d={svgD}
-                      fill={showPaint && idx === 0 ? shape.fillColor : 'none'}
-                      fillOpacity={0.72}
-                      stroke={
-                        isWizSrc
-                          ? '#059669'
-                          : isSel && activeTool === 'select'
-                            ? '#1d4ed8'
-                            : '#000000'
-                      }
-                      strokeWidth={Math.max(shape.strokeWidthMm, 1.4 * strokeScale)}
+                      fill={fill}
+                      fillOpacity={isLayerFill ? (isWood ? 0.85 : 0.78) : 0.72}
+                      stroke={strokeColor}
+                      strokeWidth={sw}
                     />
                   );
                 })}
@@ -1667,7 +1832,11 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
               key={idx}
               d={d}
               fill="none"
-              stroke="#ef4444"
+              stroke={
+                appMode === 'laser-prep' && laserPreviewStyle === 'wood'
+                  ? '#1f1209'
+                  : '#ef4444'
+              }
               strokeWidth={Math.max(0.4, 2 * strokeScale)}
               strokeLinecap="round"
               strokeLinejoin="round"
@@ -1676,7 +1845,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         </g>
 
         {/* Geometric References (Never exported to laser) */}
-        {grid.showReferences && (
+        {grid.showReferences && appMode === 'design' && (
           <g>
             {refs.map((ref) => {
               if (!ref.visible) return null;
@@ -1933,7 +2102,9 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         )}
 
         {/* Selection Bounding Box & Transform Handles */}
-        {activeTool === 'select' && selectionBounds && !wizard && (
+        {(activeTool === 'select' || appMode === 'laser-prep') &&
+          selectionBounds &&
+          !wizard && (
           <g>
             {(() => {
               const tl = mathToSvgMm(
@@ -1967,7 +2138,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
                     pointerEvents="none"
                   />
 
-                  {!selectedAreDerived && (
+                  {!selectedAreDerived && appMode === 'design' && (
                     <>
                       {/* Rotation stem & handle */}
                       <line
@@ -2035,7 +2206,9 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         )}
 
         {/* Magnetic Snap Indicator */}
-        {(activeTool !== 'select' && activeTool !== 'pan') || drag?.kind === 'move-ref-point' ? (
+        {appMode === 'design' &&
+        ((activeTool !== 'select' && activeTool !== 'pan') ||
+          drag?.kind === 'move-ref-point') ? (
           <g pointerEvents="none">
             {(() => {
               const sp = mathToSvgMm(

@@ -1,7 +1,12 @@
-import { BoardConfig, DesignShape } from '../types/geometry';
+import { BoardConfig, DesignShape, LaserDepthId } from '../types/geometry';
 import { applyMatrix, mathToSvgMm, roundCoord, transformMathPath } from './math2d';
 import { getShapeLocalPaths, isShapeFillable } from './presets';
-import { buildDeduplicatedTessellationLaserPaths } from './tessellations';
+import {
+  getShapeLaserLayer,
+  LASER_LAYERS,
+  LASER_LAYER_MAP,
+} from './laserLayers';
+import { buildTessellationExportByLayer } from './tessellations';
 
 export function buildBoardBorderSvgPaths(board: BoardConfig): string[] {
   const w = board.widthCm * 10;
@@ -41,7 +46,7 @@ export function buildBoardBorderSvgPaths(board: BoardConfig): string[] {
     const holeR = Math.max(1, board.hangingHoleDiameterMm / 2);
     const cx = w / 2;
     const topY = board.borderShape === 'circle' ? h / 2 - Math.min(w, h) / 2 : 0;
-    const cy = topY + holeR + 6; // 6 mm margin from top edge
+    const cy = topY + holeR + 6;
     const k = 0.5522847498307936 * holeR;
     paths.push(
       `M ${roundCoord(cx + holeR)} ${roundCoord(cy)} ` +
@@ -55,68 +60,131 @@ export function buildBoardBorderSvgPaths(board: BoardConfig): string[] {
   return paths;
 }
 
+/**
+ * Generates an ordered, multi-layer SVG in millimeters compatible with
+ * Creality Falcon Design Space, LightBurn, CorelDRAW, and LaserGRBL.
+ * Each depth level has its own distinct color so Falcon auto-separates layers.
+ */
 export function buildLaserSvgString(board: BoardConfig, shapes: DesignShape[]): string {
   const wMm = roundCoord(board.widthCm * 10);
   const hMm = roundCoord(board.heightCm * 10);
   const borderPaths = buildBoardBorderSvgPaths(board);
 
-  const engravingElements: string[] = [];
+  const buckets = new Map<LaserDepthId, string[]>();
+  for (const layer of LASER_LAYERS) {
+    buckets.set(layer.id, []);
+  }
 
   for (const shape of shapes) {
     if (!shape.visible) continue;
+    const layerId = getShapeLaserLayer(shape);
+    const layerDef = LASER_LAYER_MAP[layerId];
+    const bucket = buckets.get(layerId)!;
 
     if (shape.kind === 'dots' && shape.localDots) {
       const rMm = roundCoord((shape.dotRadiusCm ?? 0.08) * 10);
-      // Scale dot radius approximately by average matrix scale
       const sx = Math.hypot(shape.matrix[0], shape.matrix[1]);
       const sy = Math.hypot(shape.matrix[2], shape.matrix[3]);
       const scaledRMm = roundCoord(Math.max(0.25, rMm * ((sx + sy) / 2)));
       for (const dot of shape.localDots) {
         const mp = applyMatrix(shape.matrix, dot);
         const sp = mathToSvgMm(mp, board.widthCm, board.heightCm);
-        engravingElements.push(
-          `    <circle cx="${sp.x}" cy="${sp.y}" r="${scaledRMm}" />`
-        );
+        if (layerId === 'engrave-fill') {
+          bucket.push(
+            `    <circle cx="${sp.x}" cy="${sp.y}" r="${scaledRMm}" fill="${layerDef.color}" stroke="none" />`
+          );
+        } else {
+          bucket.push(
+            `    <circle cx="${sp.x}" cy="${sp.y}" r="${scaledRMm}" fill="none" stroke="${layerDef.color}" />`
+          );
+        }
       }
       continue;
     }
 
     if (shape.kind === 'tessellation' && shape.tessellation) {
-      const segs = buildDeduplicatedTessellationLaserPaths(
+      const grouped = buildTessellationExportByLayer(
         shape.tessellation,
         shape.matrix,
         board.widthCm,
-        board.heightCm
+        board.heightCm,
+        layerId
       );
-      if (segs.length > 0) {
-        engravingElements.push(`    <path d="${segs.join(' ')}" />`);
-      }
+      grouped.forEach((b, bLayerId) => {
+        const targetBucket = buckets.get(bLayerId)!;
+        const bDef = LASER_LAYER_MAP[bLayerId];
+        if (b.lineSegments.length > 0) {
+          const dStr = b.lineSegments
+            .map(([p1, p2]) => {
+              const s1 = mathToSvgMm(p1, board.widthCm, board.heightCm);
+              const s2 = mathToSvgMm(p2, board.widthCm, board.heightCm);
+              return `M ${s1.x} ${s1.y} L ${s2.x} ${s2.y}`;
+            })
+            .join(' ');
+          targetBucket.push(`    <path d="${dStr}" fill="none" stroke="${bDef.color}" />`);
+        }
+        for (const poly of b.fillPolygons) {
+          const dStr =
+            poly
+              .map((pt, idx) => {
+                const sp = mathToSvgMm(pt, board.widthCm, board.heightCm);
+                return `${idx === 0 ? 'M' : 'L'} ${sp.x} ${sp.y}`;
+              })
+              .join(' ') + ' Z';
+          targetBucket.push(
+            `    <path d="${dStr}" fill="${bDef.color}" stroke="${bDef.color}" stroke-width="0.1" />`
+          );
+        }
+      });
       continue;
     }
 
     const localPaths = getShapeLocalPaths(shape);
     for (const d of localPaths) {
       const { svgD } = transformMathPath(d, shape.matrix, board.widthCm, board.heightCm);
-      if (svgD) {
-        engravingElements.push(`    <path d="${svgD}" />`);
+      if (!svgD) continue;
+      if (layerId === 'engrave-fill') {
+        const isClosed = d.trim().toUpperCase().endsWith('Z');
+        if (isClosed) {
+          bucket.push(
+            `    <path d="${svgD}" fill="${layerDef.color}" stroke="${layerDef.color}" stroke-width="0.1" />`
+          );
+        } else {
+          bucket.push(`    <path d="${svgD}" fill="none" stroke="${layerDef.color}" />`);
+        }
+      } else {
+        bucket.push(`    <path d="${svgD}" />`);
       }
     }
   }
 
-  const cutElements = borderPaths.map((d) => `    <path d="${d}" />`);
+  // Board outer cut border (always last in CAPA_6_CORTE_BORDE)
+  const borderBucket = buckets.get('cut-border')!;
+  for (const d of borderPaths) {
+    borderBucket.push(`    <path d="${d}" />`);
+  }
+
+  const groupBlocks: string[] = [];
+  for (const layer of LASER_LAYERS) {
+    const items = buckets.get(layer.id) ?? [];
+    if (items.length === 0) continue;
+    const isFill = layer.id === 'engrave-fill';
+    const isCut = layer.id === 'cut-inner' || layer.id === 'cut-border';
+    const sw = isCut ? '0.1' : layer.id === 'engrave-deep' ? '0.35' : '0.2';
+    groupBlocks.push(
+      `  <!-- ${layer.name} (${layer.color}) — Modo Falcon: ${layer.falconMode} -->`,
+      `  <g id="${layer.svgGroupId}" fill="${isFill ? layer.color : 'none'}" stroke="${layer.color}" stroke-width="${sw}" stroke-linecap="round" stroke-linejoin="round">`,
+      ...items,
+      `  </g>`
+    );
+  }
 
   return [
     `<?xml version="1.0" encoding="UTF-8"?>`,
     `<svg xmlns="http://www.w3.org/2000/svg" width="${wMm}mm" height="${hMm}mm" viewBox="0 0 ${wMm} ${hMm}">`,
     `  <!-- Creado con Taller de Transformación Isométrica — Profesora Naomi Urrea -->`,
-    `  <!-- GRABADO_INTERIOR: Trazos negros (#000000) para marcar/grabar sobre madera -->`,
-    `  <g id="GRABADO_INTERIOR" fill="none" stroke="#000000" stroke-width="0.25" stroke-linecap="round" stroke-linejoin="round">`,
-    ...engravingElements,
-    `  </g>`,
-    `  <!-- CORTE_BORDE: Línea roja (#ff0000) exclusivamente para cortar el contorno exterior -->`,
-    `  <g id="CORTE_BORDE" fill="none" stroke="#ff0000" stroke-width="0.1" stroke-linecap="round" stroke-linejoin="round">`,
-    ...cutElements,
-    `  </g>`,
+    `  <!-- Optimizado por capas de color para Creality CR-Laser Falcon 10W / Falcon Design Space -->`,
+    ...groupBlocks,
     `</svg>`,
   ].join('\n');
 }

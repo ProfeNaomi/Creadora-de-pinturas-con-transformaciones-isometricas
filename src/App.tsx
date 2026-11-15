@@ -1,14 +1,19 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { CanvasWorkspace } from './components/CanvasWorkspace';
 import { HelpModal } from './components/HelpModal';
+import { LaserDepthPanel, LaserPreviewStyle } from './components/LaserDepthPanel';
+import { LaserLeftToolbar, LaserToolMode } from './components/LaserLeftToolbar';
 import { LeftToolbar } from './components/LeftToolbar';
 import { RightPanel } from './components/RightPanel';
 import { TessellationModal } from './components/TessellationModal';
 import { TopBar } from './components/TopBar';
 import {
+  AppMode,
   BoardConfig,
   DesignShape,
   GridConfig,
+  LaserDepthId,
+  MaterialPresetId,
   Matrix2D,
   Point2D,
   PresetId,
@@ -24,6 +29,7 @@ import {
   TransformRecord,
   ViewMode,
 } from './types/geometry';
+import { buildLaserDxfString } from './utils/dxfExport';
 import {
   buildTransformMatrixForParams,
   formatNum,
@@ -106,6 +112,16 @@ export function App() {
   const [clipboard, setClipboard] = useState<DesignShape[]>([]);
   const [helpOpen, setHelpOpen] = useState(false);
   const [tessellationOpen, setTessellationOpen] = useState(false);
+
+  // Modo 2: Clasificación de profundidad láser (Creality CR-Laser Falcon 10W)
+  const [appMode, setAppMode] = useState<AppMode>('design');
+  const [laserTool, setLaserTool] = useState<LaserToolMode>('select');
+  const [activeBrushLayer, setActiveBrushLayer] =
+    useState<LaserDepthId>('engrave-deep');
+  const [laserPreviewStyle, setLaserPreviewStyle] =
+    useState<LaserPreviewStyle>('layers');
+  const [materialId, setMaterialId] =
+    useState<MaterialPresetId>('plywood-3mm');
 
   const countersRef = useRef({
     shape: 1,
@@ -968,6 +984,81 @@ export function App() {
     [commitState]
   );
 
+  const handleExportLaserDxf = () => {
+    const dxf = buildLaserDxfString(board, snapshot.shapes);
+    downloadTextFile(
+      `falcon10w-isometrico-${board.widthCm}x${board.heightCm}cm.dxf`,
+      dxf,
+      'application/dxf;charset=utf-8'
+    );
+  };
+
+  const handleAssignLayerToShapes = useCallback(
+    (shapeIds: string[], layer: LaserDepthId) => {
+      if (shapeIds.length === 0) return;
+      const idSet = new Set(shapeIds);
+      commitState((prev) => ({
+        ...prev,
+        shapes: prev.shapes.map((s) =>
+          idSet.has(s.id) ? { ...s, laserLayer: layer } : s
+        ),
+      }));
+    },
+    [commitState]
+  );
+
+  const handleAlternateTransformLayers = useCallback(
+    (transformId: string, layerA: LaserDepthId, layerB: LaserDepthId) => {
+      commitState((prev) => {
+        const rec = prev.transforms.find((t) => t.id === transformId);
+        const sourceSet = new Set(rec?.sourceIds ?? []);
+        return {
+          ...prev,
+          shapes: prev.shapes.map((s) => {
+            if (s.derivedFrom?.transformId === transformId) {
+              const idx = s.derivedFrom.copyIndex;
+              return {
+                ...s,
+                laserLayer: idx % 2 === 1 ? layerB : layerA,
+              };
+            }
+            if (sourceSet.has(s.id)) {
+              return { ...s, laserLayer: layerA };
+            }
+            return s;
+          }),
+        };
+      });
+    },
+    [commitState]
+  );
+
+  const handleUpdateTessellationRoles = useCallback(
+    (
+      shapeId: string,
+      roleLayers: Record<string, LaserDepthId>,
+      borderLayer?: LaserDepthId
+    ) => {
+      commitState((prev) => ({
+        ...prev,
+        shapes: prev.shapes.map((s) => {
+          if (s.id !== shapeId || s.kind !== 'tessellation' || !s.tessellation) {
+            return s;
+          }
+          return {
+            ...s,
+            tessellation: {
+              ...s.tessellation,
+              roleLaserLayers: roleLayers,
+              borderLaserLayer: borderLayer ?? s.tessellation.borderLaserLayer,
+            },
+          };
+        }),
+      }));
+    },
+    [commitState]
+  );
+
   const handleClearAll = () => {
     if (
       snapshot.shapes.length === 0 &&
@@ -986,6 +1077,11 @@ export function App() {
   return (
     <div className="h-screen w-screen flex flex-col bg-slate-100 overflow-hidden">
       <TopBar
+        appMode={appMode}
+        onChangeAppMode={(mode) => {
+          setAppMode(mode);
+          setSelectedRefId(null);
+        }}
         board={board}
         onChangeBoard={setBoard}
         viewMode={viewMode}
@@ -995,6 +1091,7 @@ export function App() {
         onUndo={handleUndo}
         onRedo={handleRedo}
         onExportLaserSvg={handleExportLaserSvg}
+        onExportLaserDxf={handleExportLaserDxf}
         onExportPaintPng={handleExportPaintPng}
         onSaveProject={handleSaveProject}
         onLoadProject={handleLoadProject}
@@ -1003,18 +1100,33 @@ export function App() {
       />
 
       <div className="flex-1 flex min-h-0 overflow-hidden">
-        <LeftToolbar
-          activeTool={activeTool}
-          onSelectTool={setActiveTool}
-          activePreset={activePreset}
-          onSelectPreset={setActivePreset}
-          polygonSides={polygonSides}
-          onChangePolygonSides={setPolygonSides}
-          onQuickAddAxis={handleQuickAddAxis}
-          onOpenTessellations={() => setTessellationOpen(true)}
-        />
+        {appMode === 'design' ? (
+          <LeftToolbar
+            activeTool={activeTool}
+            onSelectTool={setActiveTool}
+            activePreset={activePreset}
+            onSelectPreset={setActivePreset}
+            polygonSides={polygonSides}
+            onChangePolygonSides={setPolygonSides}
+            onQuickAddAxis={handleQuickAddAxis}
+            onOpenTessellations={() => setTessellationOpen(true)}
+          />
+        ) : (
+          <LaserLeftToolbar
+            laserTool={laserTool}
+            onChangeLaserTool={setLaserTool}
+            activeBrushLayer={activeBrushLayer}
+            onSelectBrushLayer={setActiveBrushLayer}
+            onBackToDesign={() => setAppMode('design')}
+          />
+        )}
 
         <CanvasWorkspace
+          appMode={appMode}
+          laserTool={laserTool}
+          activeBrushLayer={activeBrushLayer}
+          laserPreviewStyle={laserPreviewStyle}
+          onAssignLayerToShapes={handleAssignLayerToShapes}
           board={board}
           grid={grid}
           viewMode={viewMode}
@@ -1042,58 +1154,76 @@ export function App() {
           onSelectTool={setActiveTool}
         />
 
-        <RightPanel
-          grid={grid}
-          onChangeGrid={setGrid}
-          mirrorSymmetry={mirrorSymmetry}
-          onChangeMirrorSymmetry={setMirrorSymmetry}
-          viewMode={viewMode}
-          shapes={snapshot.shapes}
-          refs={snapshot.refs}
-          transforms={snapshot.transforms}
-          selectedShapeIds={selectedShapeIds}
-          selectedRefId={selectedRefId}
-          onSelectShape={(id, additive) => {
-            setSelectedRefId(null);
-            if (additive) {
-              setSelectedShapeIds((prev) =>
-                prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]
-              );
-            } else {
-              setSelectedShapeIds([id]);
+        {appMode === 'design' ? (
+          <RightPanel
+            grid={grid}
+            onChangeGrid={setGrid}
+            mirrorSymmetry={mirrorSymmetry}
+            onChangeMirrorSymmetry={setMirrorSymmetry}
+            viewMode={viewMode}
+            shapes={snapshot.shapes}
+            refs={snapshot.refs}
+            transforms={snapshot.transforms}
+            selectedShapeIds={selectedShapeIds}
+            selectedRefId={selectedRefId}
+            onSelectShape={(id, additive) => {
+              setSelectedRefId(null);
+              if (additive) {
+                setSelectedShapeIds((prev) =>
+                  prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]
+                );
+              } else {
+                setSelectedShapeIds([id]);
+              }
+            }}
+            onSelectRef={(id) => {
+              setSelectedShapeIds([]);
+              setSelectedRefId(id);
+            }}
+            onUpdateRefPoint={handleUpdateRefPointCoords}
+            onToggleRefVisible={(id) =>
+              commitState((prev) => ({
+                ...prev,
+                refs: prev.refs.map((r) =>
+                  r.id === id ? { ...r, visible: !r.visible } : r
+                ),
+              }))
             }
-          }}
-          onSelectRef={(id) => {
-            setSelectedShapeIds([]);
-            setSelectedRefId(id);
-          }}
-          onUpdateRefPoint={handleUpdateRefPointCoords}
-          onToggleRefVisible={(id) =>
-            commitState((prev) => ({
-              ...prev,
-              refs: prev.refs.map((r) =>
-                r.id === id ? { ...r, visible: !r.visible } : r
-              ),
-            }))
-          }
-          onDeleteRef={handleDeleteRef}
-          onToggleShapeVisible={(id) =>
-            commitState((prev) => ({
-              ...prev,
-              shapes: prev.shapes.map((s) =>
-                s.id === id ? { ...s, visible: !s.visible } : s
-              ),
-            }))
-          }
-          onDuplicateShape={handleDuplicateShape}
-          onDeleteShape={handleDeleteShape}
-          onUnlinkShape={handleUnlinkShape}
-          onChangeShapeFill={handleChangeShapeFill}
-          onTranslateSelected={handleTranslateSelected}
-          onToggleTransformVisible={handleToggleTransformVisible}
-          onDeleteTransform={handleDeleteTransform}
-          onUpdateTransformParam={handleUpdateTransformParam}
-        />
+            onDeleteRef={handleDeleteRef}
+            onToggleShapeVisible={(id) =>
+              commitState((prev) => ({
+                ...prev,
+                shapes: prev.shapes.map((s) =>
+                  s.id === id ? { ...s, visible: !s.visible } : s
+                ),
+              }))
+            }
+            onDuplicateShape={handleDuplicateShape}
+            onDeleteShape={handleDeleteShape}
+            onUnlinkShape={handleUnlinkShape}
+            onChangeShapeFill={handleChangeShapeFill}
+            onTranslateSelected={handleTranslateSelected}
+            onToggleTransformVisible={handleToggleTransformVisible}
+            onDeleteTransform={handleDeleteTransform}
+            onUpdateTransformParam={handleUpdateTransformParam}
+          />
+        ) : (
+          <LaserDepthPanel
+            shapes={snapshot.shapes}
+            transforms={snapshot.transforms}
+            selectedShapeIds={selectedShapeIds}
+            laserPreviewStyle={laserPreviewStyle}
+            onChangePreviewStyle={setLaserPreviewStyle}
+            materialId={materialId}
+            onChangeMaterial={setMaterialId}
+            onSelectShapes={setSelectedShapeIds}
+            onAssignLayerToShapes={handleAssignLayerToShapes}
+            onAlternateTransformLayers={handleAlternateTransformLayers}
+            onUpdateTessellationRoles={handleUpdateTessellationRoles}
+            onExportLaserSvg={handleExportLaserSvg}
+            onExportLaserDxf={handleExportLaserDxf}
+          />
+        )}
       </div>
 
       <HelpModal open={helpOpen} onClose={() => setHelpOpen(false)} />

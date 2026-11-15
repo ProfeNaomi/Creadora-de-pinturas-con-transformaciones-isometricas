@@ -1,4 +1,5 @@
 import {
+  LaserDepthId,
   Matrix2D,
   Point2D,
   TessellationId,
@@ -706,4 +707,78 @@ export function buildDeduplicatedTessellationLaserPaths(
   }
 
   return pathSegments;
+}
+
+/**
+ * Groups deduplicated tessellation segments (for line/cut layers) and closed polygons
+ * (for fill layers) by LaserDepthId.
+ */
+export function buildTessellationExportByLayer(
+  spec: TessellationSpec,
+  matrix: Matrix2D,
+  boardWidthCm: number,
+  boardHeightCm: number,
+  defaultLayer: LaserDepthId
+): Map<LaserDepthId, { lineSegments: [Point2D, Point2D][]; fillPolygons: Point2D[][] }> {
+  const result = new Map<
+    LaserDepthId,
+    { lineSegments: [Point2D, Point2D][]; fillPolygons: Point2D[][] }
+  >();
+  const seenPerLayer = new Map<LaserDepthId, Set<string>>();
+
+  const ensureLayer = (layer: LaserDepthId) => {
+    if (!result.has(layer)) {
+      result.set(layer, { lineSegments: [], fillPolygons: [] });
+      seenPerLayer.set(layer, new Set());
+    }
+    return result.get(layer)!;
+  };
+
+  const addSeg = (layer: LaserDepthId, p1: Point2D, p2: Point2D) => {
+    const bucket = ensureLayer(layer);
+    const seen = seenPerLayer.get(layer)!;
+    const m1 = applyMatrix(matrix, p1);
+    const m2 = applyMatrix(matrix, p2);
+    const s1 = mathToSvgMm(m1, boardWidthCm, boardHeightCm);
+    const s2 = mathToSvgMm(m2, boardWidthCm, boardHeightCm);
+    if (Math.hypot(s2.x - s1.x, s2.y - s1.y) < 0.05) return;
+
+    const q = (v: number) => Math.round(v * 200);
+    const k1 = `${q(s1.x)},${q(s1.y)}`;
+    const k2 = `${q(s2.x)},${q(s2.y)}`;
+    const key = k1 < k2 ? `${k1}|${k2}` : `${k2}|${k1}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+
+    bucket.lineSegments.push([m1, m2]);
+  };
+
+  for (const tile of spec.tiles) {
+    const layer = spec.roleLaserLayers?.[tile.role] ?? defaultLayer;
+    const bucket = ensureLayer(layer);
+    if (layer === 'engrave-fill') {
+      bucket.fillPolygons.push(tile.points.map((pt) => applyMatrix(matrix, pt)));
+    } else {
+      for (let i = 0; i < tile.points.length; i++) {
+        addSeg(layer, tile.points[i], tile.points[(i + 1) % tile.points.length]);
+      }
+    }
+  }
+
+  if (spec.includeBorder) {
+    const borderLayer = spec.borderLaserLayer ?? defaultLayer;
+    const hw = spec.widthCm / 2;
+    const hh = spec.heightCm / 2;
+    const bPts: Point2D[] = [
+      { x: -hw, y: -hh },
+      { x: hw, y: -hh },
+      { x: hw, y: hh },
+      { x: -hw, y: hh },
+    ];
+    for (let i = 0; i < 4; i++) {
+      addSeg(borderLayer, bPts[i], bPts[(i + 1) % 4]);
+    }
+  }
+
+  return result;
 }
