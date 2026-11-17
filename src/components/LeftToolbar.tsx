@@ -2,10 +2,12 @@ import React, { useState } from 'react';
 import {
   ArrowRight,
   Circle,
+  Combine,
   Compass,
   Dot,
   Eraser,
   FlipHorizontal2,
+  Group,
   Hand,
   Hexagon,
   LayoutGrid,
@@ -13,12 +15,18 @@ import {
   MousePointer2,
   Move,
   Pencil,
+  PenTool,
   Plus,
   RefreshCw,
   RotateCw,
+  Scissors,
   Shapes,
   Slash,
   Sparkles,
+  Spline,
+  Split,
+  Type,
+  Ungroup,
 } from 'lucide-react';
 import { PresetId, ToolId } from '../types/geometry';
 import { PRESET_LIST, PresetCategory } from '../utils/presets';
@@ -32,6 +40,14 @@ interface LeftToolbarProps {
   onChangePolygonSides: (sides: number) => void;
   onQuickAddAxis: (kind: 'x' | 'y' | 'diag1' | 'diag2' | 'origin') => void;
   onOpenTessellations: () => void;
+  canGroup: boolean;
+  canUngroup: boolean;
+  canJoin: boolean;
+  canSplit: boolean;
+  onGroupSelected: () => void;
+  onUngroupSelected: () => void;
+  onJoinSelected: () => void;
+  onSplitSelected: () => void;
 }
 
 interface ToolButtonProps {
@@ -85,6 +101,14 @@ export const LeftToolbar: React.FC<LeftToolbarProps> = ({
   onChangePolygonSides,
   onQuickAddAxis,
   onOpenTessellations,
+  canGroup,
+  canUngroup,
+  canJoin,
+  canSplit,
+  onGroupSelected,
+  onUngroupSelected,
+  onJoinSelected,
+  onSplitSelected,
 }) => {
   const [showPresets, setShowPresets] = useState(false);
   const [presetCat, setPresetCat] = useState<'all' | PresetCategory>('all');
@@ -118,13 +142,83 @@ export const LeftToolbar: React.FC<LeftToolbarProps> = ({
           title="Desplazar la vista del lienzo (también con Espacio + arrastrar)"
         />
         <ToolButton
+          active={activeTool === 'trim'}
+          onClick={() => onSelectTool('trim')}
+          icon={<Scissors className="w-4 h-4" />}
+          label="Recortar"
+          title="Tijeras: borra solo el tramo entre intersecciones (ej. parte de un círculo que se cruza) (T)"
+          accent="rose"
+        />
+        <ToolButton
           active={activeTool === 'eraser'}
           onClick={() => onSelectTool('eraser')}
           icon={<Eraser className="w-4 h-4" />}
           label="Borrar"
-          title="Haz clic sobre cualquier figura o referencia para borrarla (E)"
+          title="Haz clic sobre cualquier figura o referencia para borrarla completa (E)"
           accent="rose"
         />
+      </div>
+
+      <div className="h-px bg-slate-200 mx-1" />
+
+      {/* Block & Path Unification Actions */}
+      <div className="flex flex-col gap-1">
+        <div className="text-[9px] font-bold uppercase tracking-wider text-indigo-600 text-center">
+          Bloques
+        </div>
+        <button
+          type="button"
+          onClick={onGroupSelected}
+          title="Agrupar líneas o figuras seleccionadas en un bloque conjunto (Ctrl+G)"
+          className={`w-full px-1.5 py-1.5 rounded-lg flex flex-col items-center justify-center gap-0.5 transition text-[10px] font-medium leading-tight cursor-pointer border ${
+            canGroup
+              ? 'bg-indigo-50 text-indigo-700 border-indigo-200 hover:bg-indigo-100'
+              : 'bg-white text-slate-500 border-transparent hover:bg-slate-100 hover:text-slate-800'
+          }`}
+        >
+          <Group className="w-4 h-4" />
+          <span className="truncate max-w-full">Agrupar</span>
+        </button>
+        <button
+          type="button"
+          onClick={onUngroupSelected}
+          disabled={!canUngroup}
+          title="Desagrupar bloque en sus elementos originales (Ctrl+Shift+G)"
+          className={`w-full px-1.5 py-1.5 rounded-lg flex flex-col items-center justify-center gap-0.5 transition text-[10px] font-medium leading-tight border ${
+            canUngroup
+              ? 'bg-amber-50 text-amber-800 border-amber-200 hover:bg-amber-100 cursor-pointer'
+              : 'bg-white text-slate-300 border-transparent opacity-60 cursor-not-allowed'
+          }`}
+        >
+          <Ungroup className="w-4 h-4" />
+          <span className="truncate max-w-full">Desagrup.</span>
+        </button>
+        <button
+          type="button"
+          onClick={onJoinSelected}
+          title="Unir trazos conectados en una sola figura cerrada rellenable (Ctrl+J)"
+          className={`w-full px-1.5 py-1.5 rounded-lg flex flex-col items-center justify-center gap-0.5 transition text-[10px] font-medium leading-tight cursor-pointer border ${
+            canJoin
+              ? 'bg-violet-50 text-violet-700 border-violet-200 hover:bg-violet-100'
+              : 'bg-white text-slate-500 border-transparent hover:bg-slate-100 hover:text-slate-800'
+          }`}
+        >
+          <Combine className="w-4 h-4" />
+          <span className="truncate max-w-full">Unir</span>
+        </button>
+        <button
+          type="button"
+          onClick={onSplitSelected}
+          title="Dividir figuras o cruces en trazos sueltos para borrar partes por separado (Ctrl+Shift+J)"
+          className={`w-full px-1.5 py-1.5 rounded-lg flex flex-col items-center justify-center gap-0.5 transition text-[10px] font-medium leading-tight cursor-pointer border ${
+            canSplit
+              ? 'bg-rose-50 text-rose-700 border-rose-200 hover:bg-rose-100'
+              : 'bg-white text-slate-500 border-transparent hover:bg-slate-100 hover:text-slate-800'
+          }`}
+        >
+          <Split className="w-4 h-4" />
+          <span className="truncate max-w-full">Dividir</span>
+        </button>
       </div>
 
       <div className="h-px bg-slate-200 mx-1" />
@@ -154,6 +248,20 @@ export const LeftToolbar: React.FC<LeftToolbarProps> = ({
           icon={<Minus className="w-4 h-4 -rotate-45" />}
           label="Trazo"
           title="Segmento recto entre dos puntos con imán"
+        />
+        <ToolButton
+          active={activeTool === 'curve'}
+          onClick={() => onSelectTool('curve')}
+          icon={<Spline className="w-4 h-4" />}
+          label="Curva"
+          title="Curva de 3 puntos: inicio, fin y punto exacto por donde pasa la curva"
+        />
+        <ToolButton
+          active={activeTool === 'spline'}
+          onClick={() => onSelectTool('spline')}
+          icon={<PenTool className="w-4 h-4" />}
+          label="Curva +"
+          title="Curva continua multipunto: haz clic en varios puntos para dibujar ondas o figuras cerradas"
         />
         <ToolButton
           active={activeTool === 'circle'}
@@ -223,7 +331,7 @@ export const LeftToolbar: React.FC<LeftToolbarProps> = ({
             }}
             icon={<Shapes className="w-4 h-4" />}
             label="Formas"
-            title="Flores, pétalos, hojas y figuras artísticas (26 motivos)"
+            title={`Flores, pétalos, figuras y animales (${PRESET_LIST.length} motivos)`}
           />
           {showPresets && (
             <div className="fixed left-[82px] top-20 bg-white border border-slate-200 rounded-xl shadow-2xl p-3 z-50 w-[340px]">
@@ -246,6 +354,7 @@ export const LeftToolbar: React.FC<LeftToolbarProps> = ({
                     { id: 'all', label: 'Todas' },
                     { id: 'flores', label: 'Flores' },
                     { id: 'petalos', label: 'Pétalos/Hojas' },
+                    { id: 'animales', label: 'Animales' },
                     { id: 'figuras', label: 'Figuras' },
                   ] as const
                 ).map((cat) => (
@@ -294,6 +403,7 @@ export const LeftToolbar: React.FC<LeftToolbarProps> = ({
                                 ? 'rgba(99, 102, 241, 0.14)'
                                 : 'none'
                             }
+                            fillRule="evenodd"
                             stroke="currentColor"
                             strokeWidth="0.14"
                             strokeLinecap="round"
@@ -311,6 +421,20 @@ export const LeftToolbar: React.FC<LeftToolbarProps> = ({
             </div>
           )}
         </div>
+
+        {/* Text Tool */}
+        <ToolButton
+          active={activeTool === 'text'}
+          onClick={() => {
+            setShowPresets(false);
+            setShowPolygonMenu(false);
+            setShowQuickAxes(false);
+            onSelectTool('text');
+          }}
+          icon={<Type className="w-4 h-4" />}
+          label="Texto"
+          title="Colocar texto con diferentes fuentes tipográficas"
+        />
 
         {/* Tessellations Button */}
         <ToolButton

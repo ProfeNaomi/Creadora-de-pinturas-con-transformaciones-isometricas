@@ -1,8 +1,14 @@
-import { BoardConfig, DesignShape, LaserDepthId } from '../types/geometry';
-import { applyMatrix, mathToSvgMm, roundCoord, transformMathPath } from './math2d';
+import { BoardConfig, DesignShape, LaserDepthId, Matrix2D } from '../types/geometry';
+import {
+  applyMatrix,
+  IDENTITY_MATRIX,
+  mathToSvgMm,
+  multiplyMatrices,
+  roundCoord,
+  transformMathPath,
+} from './math2d';
 import { getShapeLocalPaths, isShapeFillable } from './presets';
 import {
-  getShapeLaserLayer,
   LASER_LAYERS,
   LASER_LAYER_MAP,
 } from './laserLayers';
@@ -75,19 +81,33 @@ export function buildLaserSvgString(board: BoardConfig, shapes: DesignShape[]): 
     buckets.set(layer.id, []);
   }
 
-  for (const shape of shapes) {
-    if (!shape.visible) continue;
-    const layerId = getShapeLaserLayer(shape);
+  const appendShapeToBuckets = (
+    shape: DesignShape,
+    parentMatrix: Matrix2D,
+    inheritedLayer?: LaserDepthId
+  ) => {
+    if (!shape.visible) return;
+    const worldMatrix = multiplyMatrices(parentMatrix, shape.matrix);
+    const effectiveLayer = shape.laserLayer ?? inheritedLayer;
+
+    if (shape.kind === 'group' && shape.children) {
+      for (const child of shape.children) {
+        appendShapeToBuckets(child, worldMatrix, effectiveLayer);
+      }
+      return;
+    }
+
+    const layerId = effectiveLayer ?? 'engrave-medium';
     const layerDef = LASER_LAYER_MAP[layerId];
     const bucket = buckets.get(layerId)!;
 
     if (shape.kind === 'dots' && shape.localDots) {
       const rMm = roundCoord((shape.dotRadiusCm ?? 0.08) * 10);
-      const sx = Math.hypot(shape.matrix[0], shape.matrix[1]);
-      const sy = Math.hypot(shape.matrix[2], shape.matrix[3]);
+      const sx = Math.hypot(worldMatrix[0], worldMatrix[1]);
+      const sy = Math.hypot(worldMatrix[2], worldMatrix[3]);
       const scaledRMm = roundCoord(Math.max(0.25, rMm * ((sx + sy) / 2)));
       for (const dot of shape.localDots) {
-        const mp = applyMatrix(shape.matrix, dot);
+        const mp = applyMatrix(worldMatrix, dot);
         const sp = mathToSvgMm(mp, board.widthCm, board.heightCm);
         if (layerId === 'engrave-fill') {
           bucket.push(
@@ -99,13 +119,13 @@ export function buildLaserSvgString(board: BoardConfig, shapes: DesignShape[]): 
           );
         }
       }
-      continue;
+      return;
     }
 
     if (shape.kind === 'tessellation' && shape.tessellation) {
       const grouped = buildTessellationExportByLayer(
         shape.tessellation,
-        shape.matrix,
+        worldMatrix,
         board.widthCm,
         board.heightCm,
         layerId
@@ -136,18 +156,18 @@ export function buildLaserSvgString(board: BoardConfig, shapes: DesignShape[]): 
           );
         }
       });
-      continue;
+      return;
     }
 
     const localPaths = getShapeLocalPaths(shape);
     for (const d of localPaths) {
-      const { svgD } = transformMathPath(d, shape.matrix, board.widthCm, board.heightCm);
+      const { svgD } = transformMathPath(d, worldMatrix, board.widthCm, board.heightCm);
       if (!svgD) continue;
       if (layerId === 'engrave-fill') {
         const isClosed = d.trim().toUpperCase().endsWith('Z');
         if (isClosed) {
           bucket.push(
-            `    <path d="${svgD}" fill="${layerDef.color}" stroke="${layerDef.color}" stroke-width="0.1" />`
+            `    <path d="${svgD}" fill="${layerDef.color}" fill-rule="evenodd" stroke="${layerDef.color}" stroke-width="0.1" />`
           );
         } else {
           bucket.push(`    <path d="${svgD}" fill="none" stroke="${layerDef.color}" />`);
@@ -156,6 +176,10 @@ export function buildLaserSvgString(board: BoardConfig, shapes: DesignShape[]): 
         bucket.push(`    <path d="${svgD}" />`);
       }
     }
+  };
+
+  for (const shape of shapes) {
+    appendShapeToBuckets(shape, IDENTITY_MATRIX);
   }
 
   // Board outer cut border (always last in CAPA_6_CORTE_BORDE)
@@ -195,21 +219,31 @@ export function buildPaintPreviewSvgString(board: BoardConfig, shapes: DesignSha
   const borderPaths = buildBoardBorderSvgPaths(board);
 
   const elements: string[] = [];
-  for (const shape of shapes) {
-    if (!shape.visible) continue;
+
+  const appendPaintShape = (shape: DesignShape, parentMatrix: Matrix2D) => {
+    if (!shape.visible) return;
+    const worldMatrix = multiplyMatrices(parentMatrix, shape.matrix);
+
+    if (shape.kind === 'group' && shape.children) {
+      for (const child of shape.children) {
+        appendPaintShape(child, worldMatrix);
+      }
+      return;
+    }
+
     if (shape.kind === 'dots' && shape.localDots) {
       const rMm = roundCoord((shape.dotRadiusCm ?? 0.08) * 10);
-      const sx = Math.hypot(shape.matrix[0], shape.matrix[1]);
-      const sy = Math.hypot(shape.matrix[2], shape.matrix[3]);
+      const sx = Math.hypot(worldMatrix[0], worldMatrix[1]);
+      const sy = Math.hypot(worldMatrix[2], worldMatrix[3]);
       const scaledRMm = roundCoord(Math.max(0.25, rMm * ((sx + sy) / 2)));
       for (const dot of shape.localDots) {
-        const mp = applyMatrix(shape.matrix, dot);
+        const mp = applyMatrix(worldMatrix, dot);
         const sp = mathToSvgMm(mp, board.widthCm, board.heightCm);
         elements.push(
           `    <circle cx="${sp.x}" cy="${sp.y}" r="${scaledRMm}" fill="#111827" stroke="none" />`
         );
       }
-      continue;
+      return;
     }
 
     if (shape.kind === 'tessellation' && shape.tessellation) {
@@ -218,7 +252,7 @@ export function buildPaintPreviewSvgString(board: BoardConfig, shapes: DesignSha
           tile.points
             .map((pt, idx) => {
               const sp = mathToSvgMm(
-                applyMatrix(shape.matrix, pt),
+                applyMatrix(worldMatrix, pt),
                 board.widthCm,
                 board.heightCm
               );
@@ -243,7 +277,7 @@ export function buildPaintPreviewSvgString(board: BoardConfig, shapes: DesignSha
           borderPts
             .map((pt, idx) => {
               const sp = mathToSvgMm(
-                applyMatrix(shape.matrix, pt),
+                applyMatrix(worldMatrix, pt),
                 board.widthCm,
                 board.heightCm
               );
@@ -254,20 +288,27 @@ export function buildPaintPreviewSvgString(board: BoardConfig, shapes: DesignSha
           `    <path d="${bd}" fill="none" stroke="#111827" stroke-width="${shape.strokeWidthMm}" />`
         );
       }
-      continue;
+      return;
     }
 
     const localPaths = getShapeLocalPaths(shape);
     const canFill = isShapeFillable(shape) && shape.fillColor && shape.fillColor !== 'none';
     localPaths.forEach((d, idx) => {
-      const { svgD } = transformMathPath(d, shape.matrix, board.widthCm, board.heightCm);
+      const { svgD } = transformMathPath(d, worldMatrix, board.widthCm, board.heightCm);
       if (svgD) {
-        const fill = canFill && idx === 0 ? shape.fillColor : 'none';
+        const isClosed = d.trim().toUpperCase().endsWith('Z');
+        const fillThisPath =
+          canFill && (shape.kind === 'preset' ? idx === 0 : isClosed);
+        const fill = fillThisPath ? shape.fillColor : 'none';
         elements.push(
-          `    <path d="${svgD}" fill="${fill}" fill-opacity="0.72" stroke="#111827" stroke-width="${shape.strokeWidthMm}" />`
+          `    <path d="${svgD}" fill="${fill}" fill-rule="evenodd" fill-opacity="0.72" stroke="#111827" stroke-width="${shape.strokeWidthMm}" />`
         );
       }
     });
+  };
+
+  for (const shape of shapes) {
+    appendPaintShape(shape, IDENTITY_MATRIX);
   }
 
   const cutElements = borderPaths.map((d) => `    <path d="${d}" />`);

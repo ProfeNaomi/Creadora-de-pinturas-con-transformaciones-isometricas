@@ -1,14 +1,17 @@
-import { DesignShape, Point2D, PresetId } from '../types/geometry';
+import { DesignShape, Matrix2D, Point2D, PresetId } from '../types/geometry';
 import {
   applyMatrix,
   BoundingBox,
   boundsFromPoints,
   circleToPath,
+  ellipseToPath,
+  IDENTITY_MATRIX,
+  multiplyMatrices,
   roundCoord,
   transformMathPath,
 } from './math2d';
 
-export type PresetCategory = 'flores' | 'petalos' | 'figuras';
+export type PresetCategory = 'flores' | 'petalos' | 'figuras' | 'animales';
 
 export interface PresetDefinition {
   id: PresetId;
@@ -305,7 +308,7 @@ export const PRESET_DEFINITIONS: Record<PresetId, PresetDefinition> = {
   butterfly: {
     id: 'butterfly',
     label: 'Mariposa',
-    category: 'figuras',
+    category: 'animales',
     fillable: true,
     paths: [
       // Left upper & lower wings
@@ -317,6 +320,175 @@ export const PRESET_DEFINITIONS: Record<PresetId, PresetDefinition> = {
       // Antennae
       'M -0.05 0.75 C -0.25 1.15 -0.45 1.3 -0.6 1.25',
       'M 0.05 0.75 C 0.25 1.15 0.45 1.3 0.6 1.25',
+    ],
+  },
+  cat: {
+    id: 'cat',
+    label: 'Gato',
+    category: 'animales',
+    fillable: true,
+    paths: [
+      'M -1.05 0.45 L -1.15 1.45 L -0.42 0.88 C -0.15 0.96 0.15 0.96 0.42 0.88 L 1.15 1.45 L 1.05 0.45 C 1.45 -0.05 1.35 -0.85 0 -1.15 C -1.35 -0.85 -1.45 -0.05 -1.05 0.45 Z',
+      'M -0.92 0.55 L -0.98 1.15 L -0.52 0.78 Z',
+      'M 0.92 0.55 L 0.98 1.15 L 0.52 0.78 Z',
+      circleToPath(-0.48, 0.1, 0.15),
+      circleToPath(0.48, 0.1, 0.15),
+      'M -0.16 -0.22 L 0.16 -0.22 L 0 -0.42 Z',
+      'M -0.32 -0.58 Q -0.16 -0.72 0 -0.42 Q 0.16 -0.72 0.32 -0.58',
+      'M -0.75 -0.28 L -1.45 -0.18',
+      'M -0.75 -0.46 L -1.45 -0.54',
+      'M 0.75 -0.28 L 1.45 -0.18',
+      'M 0.75 -0.46 L 1.45 -0.54',
+    ],
+  },
+  dog: {
+    id: 'dog',
+    label: 'Perro',
+    category: 'animales',
+    fillable: true,
+    paths: [
+      'M -0.65 0.95 C -0.2 1.15 0.2 1.15 0.65 0.95 C 1.2 1.05 1.6 0.45 1.5 -0.35 C 1.45 -0.75 1.08 -0.85 0.95 -0.45 C 0.88 -0.95 0.45 -1.2 0 -1.2 C -0.45 -1.2 -0.88 -0.95 -0.95 -0.45 C -1.08 -0.85 -1.45 -0.75 -1.5 -0.35 C -1.6 0.45 -1.2 1.05 -0.65 0.95 Z',
+      'M -0.78 0.72 C -0.95 0.35 -0.98 -0.15 -0.95 -0.45',
+      'M 0.78 0.72 C 0.95 0.35 0.98 -0.15 0.95 -0.45',
+      circleToPath(-0.42, 0.24, 0.14),
+      circleToPath(0.42, 0.24, 0.14),
+      'M -0.22 -0.22 C -0.22 -0.12 0.22 -0.12 0.22 -0.22 C 0.22 -0.36 0.08 -0.48 0 -0.48 C -0.08 -0.48 -0.22 -0.36 -0.22 -0.22 Z',
+      'M -0.3 -0.65 Q -0.15 -0.8 0 -0.48 Q 0.15 -0.8 0.3 -0.65',
+    ],
+  },
+  paw: {
+    id: 'paw',
+    label: 'Huella',
+    category: 'animales',
+    fillable: true,
+    paths: [
+      [
+        'M 0 -0.05 C -0.45 -0.05 -0.85 -0.55 -0.75 -0.98 C -0.65 -1.32 -0.25 -1.25 0 -1.12 C 0.25 -1.25 0.65 -1.32 0.75 -0.98 C 0.85 -0.55 0.45 -0.05 0 -0.05 Z',
+        ellipseToPath(-1.05, 0.22, 0.26, 0.36),
+        ellipseToPath(-0.38, 0.78, 0.27, 0.38),
+        ellipseToPath(0.38, 0.78, 0.27, 0.38),
+        ellipseToPath(1.05, 0.22, 0.26, 0.36),
+      ].join(' '),
+    ],
+  },
+  bird: {
+    id: 'bird',
+    label: 'Pájaro',
+    category: 'animales',
+    fillable: true,
+    paths: [
+      'M -1.45 -0.25 C -1.05 -0.15 -0.65 -0.35 -0.3 -0.55 C 0.25 -0.85 0.85 -0.45 1.05 0.15 L 1.48 0.22 L 1.12 0.42 C 1.05 0.78 0.72 0.92 0.45 0.68 C 0.15 1.18 -0.35 1.48 -0.85 1.35 C -0.55 0.92 -0.35 0.55 -0.32 0.22 C -0.75 0.12 -1.18 -0.02 -1.45 -0.25 Z',
+      circleToPath(0.82, 0.42, 0.08),
+      'M -0.15 0.15 C -0.25 0.55 -0.45 0.92 -0.68 1.12',
+      'M 0.08 0.12 C 0.02 0.48 -0.12 0.82 -0.28 1.02',
+    ],
+  },
+  owl: {
+    id: 'owl',
+    label: 'Búho',
+    category: 'animales',
+    fillable: true,
+    paths: [
+      'M -0.85 1.35 L -0.45 1.05 C -0.15 1.15 0.15 1.15 0.45 1.05 L 0.85 1.35 C 0.88 0.95 0.95 0.62 0.85 0.32 C 1.15 -0.08 1.12 -0.85 0.55 -1.18 C 0.2 -1.32 -0.2 -1.32 -0.55 -1.18 C -1.12 -0.85 -1.15 -0.08 -0.85 0.32 C -0.95 0.62 -0.88 0.95 -0.85 1.35 Z',
+      circleToPath(-0.36, 0.52, 0.32),
+      circleToPath(0.36, 0.52, 0.32),
+      circleToPath(-0.36, 0.52, 0.11),
+      circleToPath(0.36, 0.52, 0.11),
+      'M -0.12 0.35 L 0.12 0.35 L 0 0.05 Z',
+      'M -0.85 0.22 C -0.45 -0.15 -0.45 -0.78 -0.65 -1.08',
+      'M 0.85 0.22 C 0.45 -0.15 0.45 -0.78 0.65 -1.08',
+      'M -0.25 -0.35 Q 0 -0.52 0.25 -0.35',
+      'M -0.3 -0.68 Q 0 -0.85 0.3 -0.68',
+      'M -0.45 -1.22 L -0.55 -1.42',
+      'M -0.35 -1.24 L -0.35 -1.45',
+      'M -0.25 -1.24 L -0.18 -1.42',
+      'M 0.45 -1.22 L 0.55 -1.42',
+      'M 0.35 -1.24 L 0.35 -1.45',
+      'M 0.25 -1.24 L 0.18 -1.42',
+    ],
+  },
+  fish: {
+    id: 'fish',
+    label: 'Pez',
+    category: 'animales',
+    fillable: true,
+    paths: [
+      'M 1.4 0 C 0.95 0.58 0.45 0.78 -0.05 0.72 L -0.35 1.08 L -0.42 0.55 C -0.65 0.38 -0.82 0.25 -0.95 0.18 L -1.45 0.78 L -1.12 0 L -1.45 -0.78 L -0.95 -0.18 C -0.68 -0.45 -0.25 -0.78 0.35 -0.72 C 0.85 -0.65 1.18 -0.38 1.4 0 Z',
+      circleToPath(0.88, 0.16, 0.11),
+      'M 0.55 0.45 C 0.38 0.15 0.38 -0.15 0.55 -0.45',
+      'M 0.15 -0.1 C -0.15 -0.05 -0.28 -0.32 -0.08 -0.42 C 0.08 -0.32 0.15 -0.2 0.15 -0.1 Z',
+    ],
+  },
+  turtle: {
+    id: 'turtle',
+    label: 'Tortuga',
+    category: 'animales',
+    fillable: true,
+    paths: [
+      'M -0.25 0.95 C -0.3 1.38 -0.18 1.55 0 1.55 C 0.18 1.55 0.3 1.38 0.25 0.95 C 0.65 1.05 1.45 0.82 1.55 0.25 C 1.25 0.12 0.95 0.28 0.75 0.38 C 0.88 0.05 0.85 -0.45 0.65 -0.72 C 0.95 -0.85 1.15 -1.18 0.88 -1.38 C 0.65 -1.25 0.48 -1.02 0.32 -0.92 C 0.15 -1.02 0.08 -1.35 0 -1.45 C -0.08 -1.35 -0.15 -1.02 -0.32 -0.92 C -0.48 -1.02 -0.65 -1.25 -0.88 -1.38 C -1.15 -1.18 -0.95 -0.85 -0.65 -0.72 C -0.85 -0.45 -0.88 0.05 -0.75 0.38 C -0.95 0.28 -1.25 0.12 -1.55 0.25 C -1.45 0.82 -0.65 1.05 -0.25 0.95 Z',
+      'M 0 0.92 C 0.58 0.92 0.78 0.38 0.78 -0.08 C 0.78 -0.58 0.48 -0.95 0 -0.95 C -0.48 -0.95 -0.78 -0.58 -0.78 -0.08 C -0.78 0.38 -0.58 0.92 0 0.92 Z',
+      'M 0 0.42 L 0.36 0.21 L 0.36 -0.21 L 0 -0.42 L -0.36 -0.21 L -0.36 0.21 Z',
+      'M 0 0.42 L 0 0.92',
+      'M 0.36 0.21 L 0.72 0.38',
+      'M 0.36 -0.21 L 0.68 -0.45',
+      'M 0 -0.42 L 0 -0.95',
+      'M -0.36 -0.21 L -0.68 -0.45',
+      'M -0.36 0.21 L -0.72 0.38',
+      circleToPath(-0.14, 1.3, 0.05),
+      circleToPath(0.14, 1.3, 0.05),
+    ],
+  },
+  rabbit: {
+    id: 'rabbit',
+    label: 'Conejo',
+    category: 'animales',
+    fillable: true,
+    paths: [
+      'M 0.95 -1.15 L 0.65 -1.15 C 0.65 -0.85 0.75 -0.55 0.85 -0.32 C 1.15 -0.22 1.32 -0.02 1.25 0.15 C 1.15 0.38 0.88 0.52 0.58 0.55 C 0.48 1.05 0.22 1.52 -0.05 1.48 C -0.28 1.44 -0.18 0.92 0.08 0.48 C -0.35 0.35 -0.78 0.02 -0.95 -0.42 C -1.25 -0.32 -1.45 -0.52 -1.38 -0.78 C -1.32 -0.98 -1.08 -1.02 -0.92 -0.92 L -0.78 -1.15 Z',
+      'M 0.15 0.58 C 0.02 0.92 -0.02 1.22 0.05 1.32',
+      circleToPath(0.72, 0.22, 0.08),
+      'M 1.18 0.08 L 1.45 0.12',
+      'M 1.18 0.02 L 1.45 -0.06',
+    ],
+  },
+  fox: {
+    id: 'fox',
+    label: 'Zorro',
+    category: 'animales',
+    fillable: true,
+    paths: [
+      'M -0.82 0.65 L -1.15 1.45 L -0.32 0.82 L 0.32 0.82 L 1.15 1.45 L 0.82 0.65 L 1.38 -0.15 L 0.75 -0.48 L 0 -1.25 L -0.75 -0.48 L -1.38 -0.15 Z',
+      'M -1.38 -0.15 Q -0.55 -0.22 0 -0.95 Q 0.55 -0.22 1.38 -0.15',
+      'M -0.78 0.72 L -0.98 1.2 L -0.48 0.82',
+      'M 0.78 0.72 L 0.98 1.2 L 0.48 0.82',
+      circleToPath(-0.44, 0.15, 0.11),
+      circleToPath(0.44, 0.15, 0.11),
+      'M -0.18 -0.98 L 0.18 -0.98 L 0 -1.25 Z',
+    ],
+  },
+  elephant: {
+    id: 'elephant',
+    label: 'Elefante',
+    category: 'animales',
+    fillable: true,
+    paths: [
+      'M -1.15 0.18 C -1.25 0.82 -0.65 1.15 0.05 1.15 C 0.65 1.15 0.98 0.82 0.98 0.35 C 1.15 0.38 1.32 0.65 1.45 0.85 C 1.62 0.75 1.55 0.35 1.32 0.12 C 1.15 -0.05 0.92 -0.08 0.75 -0.12 L 0.75 -1.15 L 0.32 -1.15 L 0.32 -0.58 L -0.28 -0.58 L -0.28 -1.15 L -0.75 -1.15 L -0.75 -0.35 C -1.05 -0.35 -1.25 -0.55 -1.35 -0.78 L -1.42 -0.68 C -1.35 -0.35 -1.22 -0.05 -1.15 0.18 Z',
+      'M 0.12 0.78 C -0.45 0.78 -0.58 0.15 -0.15 -0.08 C 0.22 -0.15 0.42 0.25 0.28 0.62',
+      circleToPath(0.58, 0.55, 0.09),
+      'M 0.88 -0.02 Q 1.18 -0.18 1.32 0.05',
+    ],
+  },
+  whale: {
+    id: 'whale',
+    label: 'Ballena',
+    category: 'animales',
+    fillable: true,
+    paths: [
+      'M -1.15 0.15 C -1.05 0.85 -0.35 1.15 0.45 0.92 C 0.92 0.78 1.18 0.35 1.25 -0.15 C 1.45 -0.05 1.58 0.18 1.62 0.45 C 1.35 0.38 1.22 0.22 1.15 0.05 C 1.28 -0.18 1.45 -0.35 1.58 -0.55 C 1.32 -0.52 1.12 -0.38 0.98 -0.22 C 0.72 -0.72 0.12 -0.95 -0.65 -0.92 C -1.15 -0.9 -1.25 -0.35 -1.15 0.15 Z',
+      circleToPath(-0.72, 0.08, 0.09),
+      'M -1.05 -0.45 Q -0.65 -0.65 -0.25 -0.45',
+      'M -0.35 1.05 C -0.38 1.35 -0.65 1.48 -0.82 1.35',
+      'M -0.35 1.05 C -0.32 1.35 -0.05 1.48 0.12 1.35',
     ],
   },
   star: {
@@ -432,23 +604,51 @@ export function isShapeFillable(shape: DesignShape): boolean {
   ) {
     return false;
   }
+  if (shape.kind === 'group') {
+    return Boolean(shape.children?.some((c) => c.visible && isShapeFillable(c)));
+  }
+  if (
+    shape.kind === 'freehand' ||
+    shape.kind === 'path' ||
+    shape.kind === 'curve' ||
+    shape.kind === 'spline' ||
+    shape.kind === 'text'
+  ) {
+    return getShapeLocalPaths(shape).some((d) =>
+      d.trim().toUpperCase().endsWith('Z')
+    );
+  }
   if (shape.kind === 'preset' && shape.presetId) {
     return PRESET_DEFINITIONS[shape.presetId]?.fillable ?? true;
   }
-  if (shape.kind === 'freehand') return false;
   return true;
 }
 
-export function getShapeMathBounds(shape: DesignShape): BoundingBox | null {
-  const pts: Point2D[] = [];
+function collectShapeBoundPoints(
+  shape: DesignShape,
+  parentMatrix: Matrix2D,
+  pts: Point2D[]
+): void {
+  const worldMatrix = multiplyMatrices(parentMatrix, shape.matrix);
+
+  if (shape.kind === 'group' && shape.children) {
+    for (const child of shape.children) {
+      if (child.visible) {
+        collectShapeBoundPoints(child, worldMatrix, pts);
+      }
+    }
+    return;
+  }
 
   if (shape.kind === 'dots' && shape.localDots) {
-    const r = shape.dotRadiusCm ?? 0.08;
+    const sx = Math.hypot(worldMatrix[0], worldMatrix[1]);
+    const sy = Math.hypot(worldMatrix[2], worldMatrix[3]);
+    const r = (shape.dotRadiusCm ?? 0.08) * ((sx + sy) / 2);
     for (const d of shape.localDots) {
-      const td = applyMatrix(shape.matrix, d);
+      const td = applyMatrix(worldMatrix, d);
       pts.push({ x: td.x - r, y: td.y - r }, { x: td.x + r, y: td.y + r });
     }
-    return boundsFromPoints(pts);
+    return;
   }
 
   if (shape.kind === 'tessellation' && shape.tessellation) {
@@ -460,13 +660,24 @@ export function getShapeMathBounds(shape: DesignShape): BoundingBox | null {
       { x: hw, y: hh },
       { x: -hw, y: hh },
     ];
-    return boundsFromPoints(corners.map((c) => applyMatrix(shape.matrix, c)));
+    for (const c of corners) {
+      pts.push(applyMatrix(worldMatrix, c));
+    }
+    return;
   }
 
   const paths = getShapeLocalPaths(shape);
   for (const d of paths) {
-    const res = transformMathPath(d, shape.matrix);
+    const res = transformMathPath(d, worldMatrix);
     pts.push(...res.sampledPoints);
   }
+}
+
+export function getShapeMathBounds(
+  shape: DesignShape,
+  parentMatrix: Matrix2D = IDENTITY_MATRIX
+): BoundingBox | null {
+  const pts: Point2D[] = [];
+  collectShapeBoundPoints(shape, parentMatrix, pts);
   return boundsFromPoints(pts);
 }

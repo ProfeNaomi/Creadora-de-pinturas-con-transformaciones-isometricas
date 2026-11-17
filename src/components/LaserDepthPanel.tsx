@@ -14,6 +14,7 @@ import {
   MaterialPresetId,
   TransformRecord,
 } from '../types/geometry';
+import { getGroupLeafStats } from '../utils/blocks';
 import {
   FALCON_10W_MATERIALS,
   getShapeLaserLayer,
@@ -95,16 +96,28 @@ export const LaserDepthPanel: React.FC<LaserDepthPanelProps> = ({
       'cut-inner': 0,
       'cut-border': 1, // Always includes board outer border
     };
-    for (const s of visibleShapes) {
+    const countRecursive = (s: DesignShape, inheritedLayer?: LaserDepthId) => {
+      if (!s.visible) return;
+      const effectiveLayer = s.laserLayer ?? inheritedLayer;
+      if (s.kind === 'group' && s.children) {
+        s.children.forEach((c) => countRecursive(c, effectiveLayer));
+        return;
+      }
       if (s.kind === 'tessellation' && s.tessellation) {
         const roles = new Set(s.tessellation.tiles.map((t) => t.role));
         roles.forEach((role) => {
-          const l = s.tessellation?.roleLaserLayers?.[role] ?? getShapeLaserLayer(s);
+          const l =
+            s.tessellation?.roleLaserLayers?.[role] ??
+            effectiveLayer ??
+            'engrave-medium';
           counts[l] += 1;
         });
       } else {
-        counts[getShapeLaserLayer(s)] += 1;
+        counts[effectiveLayer ?? 'engrave-medium'] += 1;
       }
+    };
+    for (const s of visibleShapes) {
+      countRecursive(s);
     }
     return counts;
   }, [visibleShapes]);
@@ -192,24 +205,43 @@ export const LaserDepthPanel: React.FC<LaserDepthPanelProps> = ({
                   ? `Figura: ${primaryShape?.name}`
                   : `${selectedShapes.length} figuras seleccionadas`}
             </span>
-            {primaryShape && (
-              <span
-                className="text-[10px] font-bold px-2 py-0.5 rounded-full text-white"
-                style={{
-                  backgroundColor:
-                    LASER_LAYER_MAP[getShapeLaserLayer(primaryShape)].color,
-                }}
-              >
-                {LASER_LAYER_MAP[getShapeLaserLayer(primaryShape)].shortName}
-              </span>
-            )}
+            {primaryShape && (() => {
+              const stats = getGroupLeafStats(primaryShape);
+              if (primaryShape.kind === 'group' && stats.layers.size > 1) {
+                return (
+                  <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-slate-200 text-slate-700">
+                    Mixto
+                  </span>
+                );
+              }
+              const singleLayer =
+                stats.layers.size === 1
+                  ? Array.from(stats.layers)[0]
+                  : getShapeLaserLayer(primaryShape);
+              return (
+                <span
+                  className="text-[10px] font-bold px-2 py-0.5 rounded-full text-white"
+                  style={{
+                    backgroundColor: LASER_LAYER_MAP[singleLayer].color,
+                  }}
+                >
+                  {LASER_LAYER_MAP[singleLayer].shortName}
+                </span>
+              );
+            })()}
           </div>
 
           <div className="grid grid-cols-1 gap-1.5">
             {selectableLayers.map((layer) => {
               const isCurrent =
                 selectedShapes.length > 0 &&
-                selectedShapes.every((s) => getShapeLaserLayer(s) === layer.id);
+                selectedShapes.every((s) => {
+                  if (s.kind === 'group') {
+                    const stats = getGroupLeafStats(s);
+                    return stats.layers.size === 1 && stats.layers.has(layer.id);
+                  }
+                  return getShapeLaserLayer(s) === layer.id;
+                });
               return (
                 <button
                   key={layer.id}

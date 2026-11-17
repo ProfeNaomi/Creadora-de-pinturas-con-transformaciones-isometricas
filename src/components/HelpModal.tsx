@@ -85,11 +85,43 @@ export const HelpModal: React.FC<HelpModalProps> = ({ open, onClose }) => {
             </ul>
           </div>
 
+          <div className="p-3 rounded-xl bg-indigo-50 border border-indigo-200">
+            <div className="font-bold text-indigo-900 mb-1">
+              4. Unificar, Dividir y Recortar Intersecciones
+            </div>
+            <p>
+              Arrastra un <strong>recuadro de selección</strong> con la herramienta Mover (o usa{' '}
+              <kbd className="font-bold">Shift + clic</kbd>) y elige{' '}
+              <strong>Agrupar</strong> (<kbd className="font-bold">Ctrl + G</kbd>) para
+              trabajar en bloque, o <strong>Unir</strong> (<kbd className="font-bold">Ctrl + J</kbd>)
+              para soldar trazos en una figura rellenable. Para borrar solo una parte de una intersección
+              (por ejemplo entre dos círculos), usa la herramienta <strong>Recortar</strong> (<kbd className="font-bold">T</kbd>)
+              o selecciona las figuras y pulsa <strong>Dividir</strong> (<kbd className="font-bold">Ctrl + Shift + J</kbd>) para separarlas en tramos independientes.
+            </p>
+          </div>
+
+          <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-200">
+            <div className="font-bold text-emerald-900 mb-1">
+              5. Líneas Curvas, Texto Vectorial y Formas de Animales
+            </div>
+            <p>
+              Usa <strong>Curva</strong> (3 puntos: inicio, fin y curvatura exacta) o{' '}
+              <strong>Curva +</strong> (curva continua multipunto; haz clic en el inicio o doble clic para terminar).
+              Con <strong>Texto</strong> puedes escribir en 6 fuentes tipográficas reales listas para pintar y cortar en láser, y en <strong>Formas</strong> encontrarás una categoría de <strong>Animales</strong>.
+            </p>
+          </div>
+
           <div className="space-y-1.5">
             <div className="font-bold text-slate-900 text-sm">
               Atajos de teclado útiles (con mouse):
             </div>
             <div className="grid grid-cols-2 gap-2 text-[11px]">
+              <div className="bg-slate-50 p-2 rounded border border-slate-200">
+                <kbd className="font-bold">Ctrl + G</kbd> / <kbd className="font-bold">Ctrl + Shift + G</kbd>: Agrupar / Desagrupar
+              </div>
+              <div className="bg-slate-50 p-2 rounded border border-slate-200">
+                <kbd className="font-bold">Ctrl + J</kbd> / <kbd className="font-bold">Ctrl + A</kbd>: Unir trazos / Selec. todo
+              </div>
               <div className="bg-slate-50 p-2 rounded border border-slate-200">
                 <kbd className="font-bold">Ctrl + Z</kbd> / <kbd className="font-bold">Ctrl + Y</kbd>: Deshacer / Rehacer
               </div>

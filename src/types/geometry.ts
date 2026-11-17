@@ -79,7 +79,34 @@ export type PresetId =
   | 'clover'
   | 'crown'
   | 'drop'
-  | 'arrow';
+  | 'arrow'
+  | 'cat'
+  | 'dog'
+  | 'paw'
+  | 'bird'
+  | 'owl'
+  | 'fish'
+  | 'turtle'
+  | 'rabbit'
+  | 'fox'
+  | 'elephant'
+  | 'whale';
+
+export type FontId =
+  | 'montserrat'
+  | 'playfair'
+  | 'pacifico'
+  | 'fredoka'
+  | 'cinzel'
+  | 'jetbrains';
+
+export interface TextSpec {
+  text: string;
+  fontId: FontId;
+  fontSizeCm: number;
+  letterSpacingCm?: number;
+  align?: 'left' | 'center' | 'right';
+}
 
 export type TessellationId =
   | 'squares'
@@ -121,11 +148,16 @@ export type ShapeKind =
   | 'freehand'
   | 'dots'
   | 'segment'
+  | 'curve'
+  | 'spline'
   | 'circle'
   | 'ellipse'
   | 'polygon'
   | 'preset'
-  | 'tessellation';
+  | 'tessellation'
+  | 'text'
+  | 'path'
+  | 'group';
 
 export interface ShapeDerivedFrom {
   transformId: string;
@@ -148,6 +180,10 @@ export interface DesignShape {
   presetId?: PresetId;
   /** For 'tessellation': clipped polygon tiles & spec */
   tessellation?: TessellationSpec;
+  /** For 'text': source text, font family & sizing metadata */
+  textSpec?: TextSpec;
+  /** For 'group': member shapes stored in the group's local coordinate space */
+  children?: DesignShape[];
   /** Transform matrix from local space (cm) to math board space (cm) */
   matrix: Matrix2D;
   /** Preview paint fill color ('none' = transparent) */
@@ -236,10 +272,13 @@ export type ToolId =
   | 'freehand'
   | 'dots'
   | 'segment'
+  | 'curve'
+  | 'spline'
   | 'circle'
   | 'ellipse'
   | 'polygon'
   | 'preset'
+  | 'text'
   | 'ref-point'
   | 'ref-line'
   | 'ref-vector'
@@ -248,6 +287,7 @@ export type ToolId =
   | 't-rotation'
   | 't-rosette'
   | 't-translation'
+  | 'trim'
   | 'eraser';
 
 export interface ProjectStateSnapshot {

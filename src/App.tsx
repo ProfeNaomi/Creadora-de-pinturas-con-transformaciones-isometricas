@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { CanvasWorkspace } from './components/CanvasWorkspace';
 import { HelpModal } from './components/HelpModal';
 import { LaserDepthPanel, LaserPreviewStyle } from './components/LaserDepthPanel';
@@ -6,6 +6,7 @@ import { LaserLeftToolbar, LaserToolMode } from './components/LaserLeftToolbar';
 import { LeftToolbar } from './components/LeftToolbar';
 import { RightPanel } from './components/RightPanel';
 import { TessellationModal } from './components/TessellationModal';
+import { TextModal } from './components/TextModal';
 import { TopBar } from './components/TopBar';
 import {
   AppMode,
@@ -24,12 +25,33 @@ import {
   RefVector,
   SavedProjectFile,
   TessellationSpec,
+  TextSpec,
   ToolId,
   TransformParams,
   TransformRecord,
   ViewMode,
 } from './types/geometry';
 import { buildLaserDxfString } from './utils/dxfExport';
+import {
+  applyFillColorRecursive,
+  applyLaserLayerRecursive,
+  canGroupShapes,
+  canJoinShapes,
+  canUngroupShapes,
+  cloneDesignShape,
+  collectUsedShapeIds,
+  groupShapesIntoBlock,
+  isShapeJoinableInput,
+  joinShapesIntoUnifiedPath,
+  toggleShapeClosed,
+  uid,
+  ungroupBlock,
+} from './utils/blocks';
+import {
+  canSplitShapes,
+  splitShapesIntoParts,
+  trimShapeAtPoint,
+} from './utils/pathSplit';
 import {
   buildTransformMatrixForParams,
   formatNum,
@@ -43,9 +65,39 @@ import {
   downloadTextFile,
   exportPaintPng,
 } from './utils/svgExport';
+import {
+  generateTextLocalPathsAsync,
+  preloadAllFonts,
+} from './utils/textFonts';
 
-function uid(prefix: string): string {
-  return `${prefix}_${Math.random().toString(36).slice(2, 9)}`;
+function unlinkTransformsForConsumedShapes(
+  shapes: DesignShape[],
+  transforms: TransformRecord[],
+  consumedSet: Set<string>
+): { shapes: DesignShape[]; transforms: TransformRecord[] } {
+  const brokenTransforms = new Set(
+    transforms
+      .filter((t) => t.sourceIds.some((sid) => consumedSet.has(sid)))
+      .map((t) => t.id)
+  );
+
+  const nextShapes = shapes.map((s) =>
+    !consumedSet.has(s.id) &&
+    s.derivedFrom &&
+    brokenTransforms.has(s.derivedFrom.transformId)
+      ? { ...s, derivedFrom: undefined }
+      : s
+  );
+
+  const nextTransforms = transforms
+    .filter((t) => !brokenTransforms.has(t.id))
+    .map((t) => ({
+      ...t,
+      createdShapeIds: t.createdShapeIds.filter((cid) => !consumedSet.has(cid)),
+    }))
+    .filter((t) => t.createdShapeIds.length > 0);
+
+  return { shapes: nextShapes, transforms: nextTransforms };
 }
 
 const DEFAULT_BOARD: BoardConfig = {
@@ -86,11 +138,16 @@ const SHAPE_NAMES: Record<DesignShape['kind'], string> = {
   freehand: 'Trazo',
   dots: 'Punteado',
   segment: 'Segmento',
+  curve: 'Curva',
+  spline: 'Curva continua',
   circle: 'Círculo',
   ellipse: 'Óvalo',
   polygon: 'Polígono',
   preset: 'Figura',
   tessellation: 'Teselación',
+  text: 'Texto',
+  path: 'Figura unida',
+  group: 'Bloque',
 };
 
 export function App() {
@@ -112,6 +169,15 @@ export function App() {
   const [clipboard, setClipboard] = useState<DesignShape[]>([]);
   const [helpOpen, setHelpOpen] = useState(false);
   const [tessellationOpen, setTessellationOpen] = useState(false);
+  const [textModal, setTextModal] = useState<{
+    open: boolean;
+    center: Point2D;
+  }>({ open: false, center: { x: 0, y: 0 } });
+  const [blockFeedback, setBlockFeedback] = useState<string | null>(null);
+
+  useEffect(() => {
+    preloadAllFonts();
+  }, []);
 
   // Modo 2: Clasificación de profundidad láser (Creality CR-Laser Falcon 10W)
   const [appMode, setAppMode] = useState<AppMode>('design');
@@ -125,6 +191,8 @@ export function App() {
 
   const countersRef = useRef({
     shape: 1,
+    group: 1,
+    unified: 1,
     point: 1,
     line: 1,
     vector: 1,
@@ -358,19 +426,19 @@ export function App() {
         for (let c = 0; c < copiesCount; c++) {
           const opMat = buildTransformMatrixForParams(params, prev.refs, c);
           for (const src of sources) {
-            const copyId = uid('sh');
-            createdShapes.push({
-              ...src,
-              id: copyId,
-              name: `${src.name}'`,
-              matrix: multiplyMatrices(opMat, src.matrix),
-              visible: true,
-              derivedFrom: {
-                transformId,
-                sourceShapeId: src.id,
-                copyIndex: c,
-              },
-            });
+            createdShapes.push(
+              cloneDesignShape(src, {
+                freshIds: true,
+                name: `${src.name}'`,
+                matrix: multiplyMatrices(opMat, src.matrix),
+                visible: true,
+                derivedFrom: {
+                  transformId,
+                  sourceShapeId: src.id,
+                  copyIndex: c,
+                },
+              })
+            );
           }
         }
 
@@ -405,11 +473,16 @@ export function App() {
       const baseLabel =
         shapeInput.kind === 'preset' && shapeInput.presetId
           ? PRESET_DEFINITIONS[shapeInput.presetId].label
-          : SHAPE_NAMES[shapeInput.kind];
+          : shapeInput.kind === 'text' && shapeInput.textSpec
+            ? `Texto "${shapeInput.textSpec.text.trim().split(/\r?\n/)[0].slice(0, 14)}"`
+            : SHAPE_NAMES[shapeInput.kind];
       const newShape: DesignShape = {
         ...shapeInput,
         id: uid('sh'),
-        name: `${baseLabel} ${countersRef.current.shape++}`,
+        name:
+          shapeInput.kind === 'text' && shapeInput.textSpec
+            ? baseLabel
+            : `${baseLabel} ${countersRef.current.shape++}`,
       };
 
       commitState((prev) => {
@@ -446,17 +519,18 @@ export function App() {
           const copies: DesignShape[] = [];
           for (let c = 0; c < mirrorSymmetry - 1; c++) {
             const opMat = buildTransformMatrixForParams(params, nextRefs, c);
-            copies.push({
-              ...newShape,
-              id: uid('sh'),
-              name: `${newShape.name}'`,
-              matrix: multiplyMatrices(opMat, newShape.matrix),
-              derivedFrom: {
-                transformId,
-                sourceShapeId: newShape.id,
-                copyIndex: c,
-              },
-            });
+            copies.push(
+              cloneDesignShape(newShape, {
+                freshIds: true,
+                name: `${newShape.name}'`,
+                matrix: multiplyMatrices(opMat, newShape.matrix),
+                derivedFrom: {
+                  transformId,
+                  sourceShapeId: newShape.id,
+                  copyIndex: c,
+                },
+              })
+            );
           }
           nextShapes.push(...copies);
           nextTransforms = [
@@ -530,11 +604,12 @@ export function App() {
     [commitState]
   );
 
-  const handleDeleteShape = useCallback(
-    (id: string) => {
+  const handleDeleteShapes = useCallback(
+    (ids: string[]) => {
+      if (ids.length === 0) return;
+      const rootSet = new Set(ids);
       commitState((prev) => {
-        // Collect all shapes cascading from deleting this shape
-        const toDelete = new Set<string>([id]);
+        const toDelete = new Set<string>(rootSet);
         let changed = true;
         while (changed) {
           changed = false;
@@ -565,9 +640,16 @@ export function App() {
           transforms: nextTransforms,
         };
       });
-      setSelectedShapeIds((sel) => sel.filter((sid) => sid !== id));
+      setSelectedShapeIds((sel) => sel.filter((sid) => !rootSet.has(sid)));
     },
     [commitState]
+  );
+
+  const handleDeleteShape = useCallback(
+    (id: string) => {
+      handleDeleteShapes([id]);
+    },
+    [handleDeleteShapes]
   );
 
   const handleDeleteRef = useCallback(
@@ -679,18 +761,19 @@ export function App() {
           for (let c = 0; c < copiesCount; c++) {
             const opMat = buildTransformMatrixForParams(nextParams, prev.refs, c);
             for (const src of sources) {
-              created.push({
-                ...src,
-                id: uid('sh'),
-                name: `${src.name}'`,
-                matrix: multiplyMatrices(opMat, src.matrix),
-                visible: tr.visible,
-                derivedFrom: {
-                  transformId: tr.id,
-                  sourceShapeId: src.id,
-                  copyIndex: c,
-                },
-              });
+              created.push(
+                cloneDesignShape(src, {
+                  freshIds: true,
+                  name: `${src.name}'`,
+                  matrix: multiplyMatrices(opMat, src.matrix),
+                  visible: tr.visible,
+                  derivedFrom: {
+                    transformId: tr.id,
+                    sourceShapeId: src.id,
+                    copyIndex: c,
+                  },
+                })
+              );
             }
           }
           nextShapes = [...nextShapes, ...created];
@@ -730,21 +813,22 @@ export function App() {
     [commitState]
   );
 
-  const handleDuplicateShape = useCallback(
-    (id: string) => {
-      const target = snapshot.shapes.find((s) => s.id === id);
-      if (!target) return;
+  const handleDuplicateShapes = useCallback(
+    (ids: string[]) => {
+      const targets = snapshot.shapes.filter((s) => ids.includes(s.id));
+      if (targets.length === 0) return;
       const offset = translationMatrix(1, -1);
-      const copy: DesignShape = {
-        ...target,
-        id: uid('sh'),
-        name: `${target.name} copia`,
-        matrix: multiplyMatrices(offset, target.matrix),
-        derivedFrom: undefined,
-        visible: true,
-      };
-      commitState((prev) => ({ ...prev, shapes: [...prev.shapes, copy] }));
-      setSelectedShapeIds([copy.id]);
+      const copies = targets.map((target) =>
+        cloneDesignShape(target, {
+          freshIds: true,
+          name: `${target.name} copia`,
+          matrix: multiplyMatrices(offset, target.matrix),
+          derivedFrom: undefined,
+          visible: true,
+        })
+      );
+      commitState((prev) => ({ ...prev, shapes: [...prev.shapes, ...copies] }));
+      setSelectedShapeIds(copies.map((c) => c.id));
     },
     [snapshot.shapes, commitState]
   );
@@ -795,17 +879,349 @@ export function App() {
 
   const handleChangeShapeFill = useCallback(
     (ids: string[], fillColor: string) => {
+      const idSet = new Set(ids);
       commitState((prev) => ({
         ...prev,
         shapes: prev.shapes.map((s) =>
-          ids.includes(s.id) ? { ...s, fillColor } : s
+          idSet.has(s.id) ? applyFillColorRecursive(s, fillColor) : s
         ),
       }));
     },
     [commitState]
   );
 
-  // Global keyboard shortcuts (Ctrl+Z, Ctrl+Y, Ctrl+C, Ctrl+V, Ctrl+D, Delete, tool keys)
+  const handleGroupShapes = useCallback(
+    (ids?: string[]) => {
+      const targetIds = ids ?? selectedShapeIds;
+      const targetSet = new Set(targetIds);
+      const selectedInOrder = snapshot.shapes.filter(
+        (s) => targetSet.has(s.id) && s.visible
+      );
+      if (!canGroupShapes(selectedInOrder)) {
+        setActiveTool('select');
+        setBlockFeedback(
+          'Selecciona al menos 2 líneas o figuras (arrastra un recuadro o usa Shift+clic) y pulsa Agrupar en Bloque.'
+        );
+        return;
+      }
+
+      const groupShape = groupShapesIntoBlock(
+        selectedInOrder,
+        `Bloque ${countersRef.current.group++}`
+      );
+      const consumedSet = new Set(selectedInOrder.map((s) => s.id));
+      const lastIdx = snapshot.shapes.reduce(
+        (acc, s, idx) => (consumedSet.has(s.id) ? idx : acc),
+        -1
+      );
+
+      commitState((prev) => {
+        const { shapes: unlinkedShapes, transforms: nextTransforms } =
+          unlinkTransformsForConsumedShapes(
+            prev.shapes,
+            prev.transforms,
+            consumedSet
+          );
+        const nextShapes: DesignShape[] = [];
+        let inserted = false;
+        unlinkedShapes.forEach((s, idx) => {
+          if (!consumedSet.has(s.id)) {
+            nextShapes.push(s);
+          }
+          if (idx === lastIdx && !inserted) {
+            nextShapes.push(groupShape);
+            inserted = true;
+          }
+        });
+        if (!inserted) nextShapes.push(groupShape);
+        return {
+          ...prev,
+          shapes: nextShapes,
+          transforms: nextTransforms,
+        };
+      });
+
+      setSelectedShapeIds([groupShape.id]);
+      setSelectedRefId(null);
+      setActiveTool('select');
+      setBlockFeedback(
+        `${groupShape.name} creado (${selectedInOrder.length} elementos). Ya puedes moverlo, rotarlo o transformarlo en conjunto.`
+      );
+    },
+    [snapshot.shapes, selectedShapeIds, commitState]
+  );
+
+  const handleUngroupShapes = useCallback(
+    (ids?: string[]) => {
+      const targetIds = ids ?? selectedShapeIds;
+      const targetSet = new Set(targetIds);
+      const groups = snapshot.shapes.filter(
+        (s) => targetSet.has(s.id) && s.kind === 'group' && (s.children?.length ?? 0) > 0
+      );
+      if (groups.length === 0) return;
+
+      const consumedSet = new Set(groups.map((g) => g.id));
+      const remainingShapes = snapshot.shapes.filter((s) => !consumedSet.has(s.id));
+      const usedIds = collectUsedShapeIds(remainingShapes);
+
+      const expandedByGroup = new Map<string, DesignShape[]>();
+      const newSelectedIds: string[] = [];
+      for (const g of groups) {
+        const expanded = ungroupBlock(g, usedIds);
+        expandedByGroup.set(g.id, expanded);
+        expanded.forEach((ch) => newSelectedIds.push(ch.id));
+      }
+
+      commitState((prev) => {
+        const { shapes: unlinkedShapes, transforms: nextTransforms } =
+          unlinkTransformsForConsumedShapes(
+            prev.shapes,
+            prev.transforms,
+            consumedSet
+          );
+        const nextShapes: DesignShape[] = [];
+        for (const s of unlinkedShapes) {
+          const expanded = expandedByGroup.get(s.id);
+          if (expanded) {
+            nextShapes.push(...expanded);
+          } else {
+            nextShapes.push(s);
+          }
+        }
+        return {
+          ...prev,
+          shapes: nextShapes,
+          transforms: nextTransforms,
+        };
+      });
+
+      setSelectedShapeIds(newSelectedIds);
+      setSelectedRefId(null);
+      setBlockFeedback(
+        `Bloque desagrupado en ${newSelectedIds.length} elementos independientes.`
+      );
+    },
+    [snapshot.shapes, selectedShapeIds, commitState]
+  );
+
+  const handleJoinShapes = useCallback(
+    (ids?: string[], options?: { forceClose?: boolean }) => {
+      const targetIds = ids ?? selectedShapeIds;
+      const targetSet = new Set(targetIds);
+      const selectedInOrder = snapshot.shapes.filter(
+        (s) => targetSet.has(s.id) && s.visible
+      );
+      if (!canJoinShapes(selectedInOrder)) {
+        setActiveTool('select');
+        setBlockFeedback(
+          'Selecciona 2 o más líneas/trazos (o un Bloque con trazos) arrastrando un recuadro para soldarlos en una sola figura.'
+        );
+        return;
+      }
+
+      const toConsume = selectedInOrder.filter((s) => isShapeJoinableInput(s));
+      const name = `Figura unida ${countersRef.current.unified++}`;
+      const result = joinShapesIntoUnifiedPath(toConsume, name, options);
+      if (!result) return;
+
+      const consumedSet = new Set(toConsume.map((s) => s.id));
+      const remaining = snapshot.shapes.filter((s) => !consumedSet.has(s.id));
+      const usedIds = collectUsedShapeIds(remaining);
+      const safeUntouched = result.untouchedShapes.map((u) => {
+        if (!usedIds.has(u.id)) {
+          usedIds.add(u.id);
+          return u;
+        }
+        const cloned = cloneDesignShape(u, { freshIds: true });
+        usedIds.add(cloned.id);
+        return cloned;
+      });
+
+      const lastIdx = snapshot.shapes.reduce(
+        (acc, s, idx) => (consumedSet.has(s.id) ? idx : acc),
+        -1
+      );
+
+      commitState((prev) => {
+        const { shapes: unlinkedShapes, transforms: nextTransforms } =
+          unlinkTransformsForConsumedShapes(
+            prev.shapes,
+            prev.transforms,
+            consumedSet
+          );
+        const nextShapes: DesignShape[] = [];
+        let inserted = false;
+        unlinkedShapes.forEach((s, idx) => {
+          if (!consumedSet.has(s.id)) {
+            nextShapes.push(s);
+          }
+          if (idx === lastIdx && !inserted) {
+            nextShapes.push(...safeUntouched, result.unifiedShape);
+            inserted = true;
+          }
+        });
+        if (!inserted) {
+          nextShapes.push(...safeUntouched, result.unifiedShape);
+        }
+        return {
+          ...prev,
+          shapes: nextShapes,
+          transforms: nextTransforms,
+        };
+      });
+
+      setSelectedShapeIds([result.unifiedShape.id]);
+      setSelectedRefId(null);
+      setActiveTool('select');
+      if (result.closedCount > 0) {
+        setBlockFeedback(
+          `Se unieron ${result.weldedConnections > 0 ? `${result.weldedConnections} uniones en ` : ''}figura cerrada: ya puedes rellenarla con pintura o grabado sólido.`
+        );
+      } else {
+        setBlockFeedback(
+          `Trazos unificados en "${result.unifiedShape.name}". Si deseas rellenarla por dentro, pulsa "Cerrar contorno".`
+        );
+      }
+    },
+    [snapshot.shapes, selectedShapeIds, commitState]
+  );
+
+  const handleToggleCloseShape = useCallback(
+    (id: string) => {
+      const target = snapshot.shapes.find((s) => s.id === id);
+      if (!target) return;
+      const toggled = toggleShapeClosed(target);
+      if (!toggled) return;
+      commitState((prev) => ({
+        ...prev,
+        shapes: prev.shapes.map((s) => (s.id === id ? toggled : s)),
+      }));
+    },
+    [snapshot.shapes, commitState]
+  );
+
+  const handleTrimAtPoint = useCallback(
+    (p: Point2D, tolCm: number) => {
+      const result = trimShapeAtPoint(snapshot.shapes, p, tolCm);
+      if (!result) return;
+
+      const consumedSet = new Set([result.targetRootId]);
+      const keptRootSameId = result.replacementShapes.some(
+        (r) => r.id === result.targetRootId
+      );
+
+      commitState((prev) => {
+        const { shapes: unlinkedShapes, transforms: nextTransforms } =
+          unlinkTransformsForConsumedShapes(
+            prev.shapes,
+            prev.transforms,
+            consumedSet
+          );
+        const nextShapes: DesignShape[] = [];
+        for (const s of unlinkedShapes) {
+          if (s.id === result.targetRootId) {
+            nextShapes.push(...result.replacementShapes);
+          } else {
+            nextShapes.push(s);
+          }
+        }
+        return {
+          ...prev,
+          shapes: nextShapes,
+          transforms: nextTransforms,
+        };
+      });
+
+      if (!keptRootSameId) {
+        setSelectedShapeIds((prev) =>
+          prev.filter((id) => id !== result.targetRootId)
+        );
+      }
+    },
+    [snapshot.shapes, commitState]
+  );
+
+  const handleSplitShapes = useCallback(
+    (ids?: string[]) => {
+      const targetIds = ids ?? selectedShapeIds;
+      const targetSet = new Set(targetIds);
+      const selectedInOrder = snapshot.shapes.filter(
+        (s) => targetSet.has(s.id) && s.visible
+      );
+      const allVisible = snapshot.shapes.filter((s) => s.visible);
+      const result = splitShapesIntoParts(selectedInOrder, allVisible);
+      if (!result) {
+        setActiveTool('select');
+        setBlockFeedback(
+          'Selecciona una figura compuesta, un bloque o figuras que se crucen entre sí para dividirlas en trazos individuales.'
+        );
+        return;
+      }
+
+      const consumedSet = new Set(result.consumedIds);
+      const lastIdx = snapshot.shapes.reduce(
+        (acc, s, idx) => (consumedSet.has(s.id) ? idx : acc),
+        -1
+      );
+
+      commitState((prev) => {
+        const { shapes: unlinkedShapes, transforms: nextTransforms } =
+          unlinkTransformsForConsumedShapes(
+            prev.shapes,
+            prev.transforms,
+            consumedSet
+          );
+        const nextShapes: DesignShape[] = [];
+        let inserted = false;
+        unlinkedShapes.forEach((s, idx) => {
+          if (!consumedSet.has(s.id)) {
+            nextShapes.push(s);
+          }
+          if (idx === lastIdx && !inserted) {
+            nextShapes.push(...result.createdShapes);
+            inserted = true;
+          }
+        });
+        if (!inserted) {
+          nextShapes.push(...result.createdShapes);
+        }
+        return {
+          ...prev,
+          shapes: nextShapes,
+          transforms: nextTransforms,
+        };
+      });
+
+      setSelectedShapeIds(result.createdShapes.map((s) => s.id));
+      setSelectedRefId(null);
+      setActiveTool('select');
+      setBlockFeedback(
+        `Se dividió en ${result.createdShapes.length} trazos independientes. Ahora puedes seleccionar y borrar las partes que no necesites.`
+      );
+    },
+    [snapshot.shapes, selectedShapeIds, commitState]
+  );
+
+  useEffect(() => {
+    if (!blockFeedback) return;
+    const timer = window.setTimeout(() => setBlockFeedback(null), 5000);
+    return () => window.clearTimeout(timer);
+  }, [blockFeedback]);
+
+  const visibleShapesList = useMemo(
+    () => snapshot.shapes.filter((s) => s.visible),
+    [snapshot.shapes]
+  );
+  const selectedShapesList = useMemo(
+    () => snapshot.shapes.filter((s) => selectedShapeIds.includes(s.id) && s.visible),
+    [snapshot.shapes, selectedShapeIds]
+  );
+  const canGroupSel = canGroupShapes(selectedShapesList);
+  const canUngroupSel = canUngroupShapes(selectedShapesList);
+  const canJoinSel = canJoinShapes(selectedShapesList);
+  const canSplitSel = canSplitShapes(selectedShapesList, visibleShapesList);
+
+  // Global keyboard shortcuts (Ctrl+Z, Ctrl+Y, Ctrl+C, Ctrl+V, Ctrl+D, Ctrl+G, Ctrl+J, Ctrl+Shift+J, Ctrl+A, Delete, tool keys)
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null;
@@ -819,18 +1235,45 @@ export function App() {
       }
 
       const mod = e.ctrlKey || e.metaKey;
+      const key = e.key.toLowerCase();
 
-      if (mod && e.key.toLowerCase() === 'z' && !e.shiftKey) {
+      if (mod && key === 'z' && !e.shiftKey) {
         e.preventDefault();
         handleUndo();
         return;
       }
-      if ((mod && e.key.toLowerCase() === 'y') || (mod && e.shiftKey && e.key.toLowerCase() === 'z')) {
+      if ((mod && key === 'y') || (mod && e.shiftKey && key === 'z')) {
         e.preventDefault();
         handleRedo();
         return;
       }
-      if (mod && e.key.toLowerCase() === 'c') {
+      if (mod && key === 'a') {
+        e.preventDefault();
+        setSelectedRefId(null);
+        setSelectedShapeIds(
+          snapshot.shapes.filter((s) => s.visible).map((s) => s.id)
+        );
+        return;
+      }
+      if (mod && key === 'g') {
+        e.preventDefault();
+        if (e.shiftKey) {
+          handleUngroupShapes();
+        } else {
+          handleGroupShapes();
+        }
+        return;
+      }
+      if (mod && key === 'j') {
+        e.preventDefault();
+        if (e.shiftKey) {
+          handleSplitShapes();
+        } else {
+          handleJoinShapes();
+        }
+        return;
+      }
+      if (mod && key === 'c') {
         if (selectedShapeIds.length > 0) {
           const copied = snapshot.shapes.filter((s) =>
             selectedShapeIds.includes(s.id)
@@ -839,18 +1282,19 @@ export function App() {
         }
         return;
       }
-      if (mod && e.key.toLowerCase() === 'v') {
+      if (mod && key === 'v') {
         if (clipboard.length > 0) {
           e.preventDefault();
           const offset = translationMatrix(1, -1);
-          const newCopies = clipboard.map((c) => ({
-            ...c,
-            id: uid('sh'),
-            name: `${c.name} copia`,
-            matrix: multiplyMatrices(offset, c.matrix),
-            derivedFrom: undefined,
-            visible: true,
-          }));
+          const newCopies = clipboard.map((c) =>
+            cloneDesignShape(c, {
+              freshIds: true,
+              name: `${c.name} copia`,
+              matrix: multiplyMatrices(offset, c.matrix),
+              derivedFrom: undefined,
+              visible: true,
+            })
+          );
           commitState((prev) => ({
             ...prev,
             shapes: [...prev.shapes, ...newCopies],
@@ -859,17 +1303,17 @@ export function App() {
         }
         return;
       }
-      if (mod && e.key.toLowerCase() === 'd') {
+      if (mod && key === 'd') {
         if (selectedShapeIds.length > 0) {
           e.preventDefault();
-          handleDuplicateShape(selectedShapeIds[0]);
+          handleDuplicateShapes(selectedShapeIds);
         }
         return;
       }
       if (e.key === 'Delete' || e.key === 'Backspace') {
         if (selectedShapeIds.length > 0) {
           e.preventDefault();
-          selectedShapeIds.forEach((id) => handleDeleteShape(id));
+          handleDeleteShapes(selectedShapeIds);
         } else if (selectedRefId) {
           e.preventDefault();
           handleDeleteRef(selectedRefId);
@@ -880,9 +1324,11 @@ export function App() {
         setActiveTool('select');
         setSelectedShapeIds([]);
         setSelectedRefId(null);
-      } else if (!mod && e.key.toLowerCase() === 'v') {
+      } else if (!mod && key === 'v') {
         setActiveTool('select');
-      } else if (!mod && e.key.toLowerCase() === 'e') {
+      } else if (!mod && key === 't') {
+        setActiveTool('trim');
+      } else if (!mod && key === 'e') {
         setActiveTool('eraser');
       }
     };
@@ -897,9 +1343,13 @@ export function App() {
     snapshot.shapes,
     clipboard,
     commitState,
-    handleDuplicateShape,
-    handleDeleteShape,
+    handleDuplicateShapes,
+    handleDeleteShapes,
     handleDeleteRef,
+    handleGroupShapes,
+    handleUngroupShapes,
+    handleJoinShapes,
+    handleSplitShapes,
   ]);
 
   const handleExportLaserSvg = () => {
@@ -984,6 +1434,72 @@ export function App() {
     [commitState]
   );
 
+  const handleInsertText = useCallback(
+    (
+      spec: TextSpec,
+      localPaths: string[],
+      centerX: number,
+      centerY: number
+    ) => {
+      handleCreateShape(
+        {
+          kind: 'text',
+          textSpec: spec,
+          localPaths,
+          matrix: translationMatrix(centerX, centerY),
+          fillColor: 'none',
+          strokeWidthMm: 0.3,
+          visible: true,
+        },
+        true
+      );
+      setActiveTool('select');
+    },
+    [handleCreateShape]
+  );
+
+  const handleUpdateTextShape = useCallback(
+    (id: string, nextSpec: TextSpec) => {
+      generateTextLocalPathsAsync(nextSpec)
+        .then((res) => {
+          if (!res) return;
+          const shortTitle = `Texto "${nextSpec.text.trim().split(/\r?\n/)[0].slice(0, 14)}"`;
+          commitState((prev) => {
+            const descendants = new Set<string>([id]);
+            let changed = true;
+            while (changed) {
+              changed = false;
+              for (const s of prev.shapes) {
+                if (
+                  s.derivedFrom &&
+                  descendants.has(s.derivedFrom.sourceShapeId) &&
+                  !descendants.has(s.id)
+                ) {
+                  descendants.add(s.id);
+                  changed = true;
+                }
+              }
+            }
+            return {
+              ...prev,
+              shapes: prev.shapes.map((s) =>
+                descendants.has(s.id)
+                  ? {
+                      ...s,
+                      name: s.id === id ? shortTitle : `${shortTitle}'`,
+                      textSpec: nextSpec,
+                      localPaths: res.localPaths,
+                    }
+                  : s
+              ),
+            };
+          });
+        })
+        .catch(() => {});
+    },
+    [commitState]
+  );
+
   const handleExportLaserDxf = () => {
     const dxf = buildLaserDxfString(board, snapshot.shapes);
     downloadTextFile(
@@ -1000,7 +1516,7 @@ export function App() {
       commitState((prev) => ({
         ...prev,
         shapes: prev.shapes.map((s) =>
-          idSet.has(s.id) ? { ...s, laserLayer: layer } : s
+          idSet.has(s.id) ? applyLaserLayerRecursive(s, layer) : s
         ),
       }));
     },
@@ -1017,13 +1533,10 @@ export function App() {
           shapes: prev.shapes.map((s) => {
             if (s.derivedFrom?.transformId === transformId) {
               const idx = s.derivedFrom.copyIndex;
-              return {
-                ...s,
-                laserLayer: idx % 2 === 1 ? layerB : layerA,
-              };
+              return applyLaserLayerRecursive(s, idx % 2 === 1 ? layerB : layerA);
             }
             if (sourceSet.has(s.id)) {
-              return { ...s, laserLayer: layerA };
+              return applyLaserLayerRecursive(s, layerA);
             }
             return s;
           }),
@@ -1110,6 +1623,14 @@ export function App() {
             onChangePolygonSides={setPolygonSides}
             onQuickAddAxis={handleQuickAddAxis}
             onOpenTessellations={() => setTessellationOpen(true)}
+            canGroup={canGroupSel}
+            canUngroup={canUngroupSel}
+            canJoin={canJoinSel}
+            canSplit={canSplitSel}
+            onGroupSelected={() => handleGroupShapes()}
+            onUngroupSelected={() => handleUngroupShapes()}
+            onJoinSelected={() => handleJoinShapes()}
+            onSplitSelected={() => handleSplitShapes()}
           />
         ) : (
           <LaserLeftToolbar
@@ -1149,9 +1670,20 @@ export function App() {
           onUpdateRefPosition={handleUpdateRefPosition}
           onApplyTransform={handleApplyTransform}
           onDeleteShape={handleDeleteShape}
+          onDeleteShapes={handleDeleteShapes}
           onDeleteRef={handleDeleteRef}
           onQuickAddAxis={handleQuickAddAxis}
           onSelectTool={setActiveTool}
+          onGroupSelected={() => handleGroupShapes()}
+          onUngroupSelected={() => handleUngroupShapes()}
+          onJoinSelected={() => handleJoinShapes()}
+          onSplitSelected={() => handleSplitShapes()}
+          onTrimAtPoint={handleTrimAtPoint}
+          onToggleCloseShape={handleToggleCloseShape}
+          onDuplicateShapes={handleDuplicateShapes}
+          onOpenTextModal={(pt) => setTextModal({ open: true, center: pt })}
+          blockFeedback={blockFeedback}
+          onDismissBlockFeedback={() => setBlockFeedback(null)}
         />
 
         {appMode === 'design' ? (
@@ -1176,6 +1708,12 @@ export function App() {
                 setSelectedShapeIds([id]);
               }
             }}
+            onSelectAllShapes={() => {
+              setSelectedRefId(null);
+              setSelectedShapeIds(
+                snapshot.shapes.filter((s) => s.visible).map((s) => s.id)
+              );
+            }}
             onSelectRef={(id) => {
               setSelectedShapeIds([]);
               setSelectedRefId(id);
@@ -1198,9 +1736,15 @@ export function App() {
                 ),
               }))
             }
-            onDuplicateShape={handleDuplicateShape}
-            onDeleteShape={handleDeleteShape}
+            onDuplicateShapes={handleDuplicateShapes}
+            onDeleteShapes={handleDeleteShapes}
             onUnlinkShape={handleUnlinkShape}
+            onGroupSelected={() => handleGroupShapes()}
+            onUngroupSelected={() => handleUngroupShapes()}
+            onJoinSelected={() => handleJoinShapes()}
+            onSplitSelected={() => handleSplitShapes()}
+            onToggleCloseShape={handleToggleCloseShape}
+            onUpdateTextShape={handleUpdateTextShape}
             onChangeShapeFill={handleChangeShapeFill}
             onTranslateSelected={handleTranslateSelected}
             onToggleTransformVisible={handleToggleTransformVisible}
@@ -1232,6 +1776,12 @@ export function App() {
         board={board}
         onClose={() => setTessellationOpen(false)}
         onInsert={handleInsertTessellation}
+      />
+      <TextModal
+        open={textModal.open}
+        initialCenter={textModal.center}
+        onClose={() => setTextModal((prev) => ({ ...prev, open: false }))}
+        onInsert={handleInsertText}
       />
     </div>
   );

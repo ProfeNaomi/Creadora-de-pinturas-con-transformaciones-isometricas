@@ -5,10 +5,15 @@ import {
   Matrix2D,
   Point2D,
 } from '../types/geometry';
-import { applyMatrix, roundCoord, transformMathPath } from './math2d';
+import {
+  applyMatrix,
+  IDENTITY_MATRIX,
+  multiplyMatrices,
+  roundCoord,
+  transformMathPath,
+} from './math2d';
 import { getShapeLocalPaths } from './presets';
 import {
-  getShapeLaserLayer,
   LASER_LAYERS,
   LASER_LAYER_MAP,
 } from './laserLayers';
@@ -170,19 +175,33 @@ export function buildLaserDxfString(board: BoardConfig, shapes: DesignShape[]): 
   const circles: DxfCircleEntity[] = [];
   const usedLayers = new Set<LaserDepthId>();
 
-  for (const shape of shapes) {
-    if (!shape.visible) continue;
-    const layerId = getShapeLaserLayer(shape);
+  const appendShapeToDxf = (
+    shape: DesignShape,
+    parentMatrix: Matrix2D,
+    inheritedLayer?: LaserDepthId
+  ) => {
+    if (!shape.visible) return;
+    const worldMatrix = multiplyMatrices(parentMatrix, shape.matrix);
+    const effectiveLayer = shape.laserLayer ?? inheritedLayer;
+
+    if (shape.kind === 'group' && shape.children) {
+      for (const child of shape.children) {
+        appendShapeToDxf(child, worldMatrix, effectiveLayer);
+      }
+      return;
+    }
+
+    const layerId = effectiveLayer ?? 'engrave-medium';
     const layerDef = LASER_LAYER_MAP[layerId];
 
     if (shape.kind === 'dots' && shape.localDots) {
       usedLayers.add(layerId);
       const rMm = roundCoord((shape.dotRadiusCm ?? 0.08) * 10);
-      const sx = Math.hypot(shape.matrix[0], shape.matrix[1]);
-      const sy = Math.hypot(shape.matrix[2], shape.matrix[3]);
+      const sx = Math.hypot(worldMatrix[0], worldMatrix[1]);
+      const sy = Math.hypot(worldMatrix[2], worldMatrix[3]);
       const scaledR = roundCoord(Math.max(0.25, rMm * ((sx + sy) / 2)));
       for (const dot of shape.localDots) {
-        const mp = applyMatrix(shape.matrix, dot);
+        const mp = applyMatrix(worldMatrix, dot);
         const dp = mathToDxfMm(mp, board.widthCm, board.heightCm);
         circles.push({
           layer: layerDef.dxfLayerName,
@@ -192,13 +211,13 @@ export function buildLaserDxfString(board: BoardConfig, shapes: DesignShape[]): 
           r: scaledR,
         });
       }
-      continue;
+      return;
     }
 
     if (shape.kind === 'tessellation' && shape.tessellation) {
       const grouped = buildTessellationExportByLayer(
         shape.tessellation,
-        shape.matrix,
+        worldMatrix,
         board.widthCm,
         board.heightCm,
         layerId
@@ -226,7 +245,7 @@ export function buildLaserDxfString(board: BoardConfig, shapes: DesignShape[]): 
           });
         }
       });
-      continue;
+      return;
     }
 
     usedLayers.add(layerId);
@@ -235,7 +254,7 @@ export function buildLaserDxfString(board: BoardConfig, shapes: DesignShape[]): 
       polylines.push(
         ...flattenMathPathToDxfPolylines(
           d,
-          shape.matrix,
+          worldMatrix,
           board.widthCm,
           board.heightCm,
           layerDef.dxfLayerName,
@@ -243,6 +262,10 @@ export function buildLaserDxfString(board: BoardConfig, shapes: DesignShape[]): 
         )
       );
     }
+  };
+
+  for (const shape of shapes) {
+    appendShapeToDxf(shape, IDENTITY_MATRIX);
   }
 
   // Board outer cut border (always on layer 6_CORTE_BORDE, red)

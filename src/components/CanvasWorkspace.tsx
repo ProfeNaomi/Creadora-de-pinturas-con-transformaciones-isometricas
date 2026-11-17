@@ -1,5 +1,17 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Maximize2, ZoomIn, ZoomOut } from 'lucide-react';
+import {
+  Combine,
+  Copy,
+  Group,
+  Maximize2,
+  Pentagon,
+  Split,
+  Trash2,
+  Ungroup,
+  X,
+  ZoomIn,
+  ZoomOut,
+} from 'lucide-react';
 import {
   AppMode,
   BoardConfig,
@@ -17,6 +29,21 @@ import {
   TransformParams,
   ViewMode,
 } from '../types/geometry';
+import {
+  canGroupShapes,
+  canJoinShapes,
+  canToggleCloseShape,
+  canUngroupShapes,
+  getGroupLeafStats,
+  hitTestShape,
+  isShapeClosed,
+  shapeIntersectsRect,
+} from '../utils/blocks';
+import {
+  canSplitShapes,
+  findTrimHoverTarget,
+  TrimTargetInfo,
+} from '../utils/pathSplit';
 import { getShapeLaserLayer, LASER_LAYER_MAP } from '../utils/laserLayers';
 import type { LaserPreviewStyle } from './LaserDepthPanel';
 import type { LaserToolMode } from './LaserLeftToolbar';
@@ -41,6 +68,8 @@ import {
   scaleMatrix,
   snapPoint,
   snapValue,
+  splinePointsToCubicPath,
+  threePointCurveToQuadraticPath,
   transformMathPath,
   translationMatrix,
 } from '../utils/math2d';
@@ -80,9 +109,20 @@ interface CanvasWorkspaceProps {
   onUpdateRefPosition: (id: string, next: RefObject) => void;
   onApplyTransform: (sourceIds: string[], params: TransformParams) => void;
   onDeleteShape: (id: string) => void;
+  onDeleteShapes?: (ids: string[]) => void;
   onDeleteRef: (id: string) => void;
   onQuickAddAxis: (kind: 'x' | 'y' | 'diag1' | 'diag2' | 'origin') => RefObject;
   onSelectTool: (tool: ToolId) => void;
+  onGroupSelected?: () => void;
+  onUngroupSelected?: () => void;
+  onJoinSelected?: () => void;
+  onSplitSelected?: () => void;
+  onTrimAtPoint?: (p: Point2D, tolCm: number) => void;
+  onToggleCloseShape?: (id: string) => void;
+  onDuplicateShapes?: (ids: string[]) => void;
+  onOpenTextModal?: (center: Point2D) => void;
+  blockFeedback?: string | null;
+  onDismissBlockFeedback?: () => void;
 }
 
 interface CameraState {
@@ -112,6 +152,15 @@ type DragInteraction =
       items: { id: string; startMatrix: Matrix2D }[];
     }
   | { kind: 'move-ref-point'; id: string }
+  | {
+      kind: 'marquee-select';
+      startMath: Point2D;
+      currentMath: Point2D;
+      startClientX: number;
+      startClientY: number;
+      additive: boolean;
+      clickFallbackShapeId?: string;
+    }
   | { kind: 'draw-freehand'; points: Point2D[] }
   | { kind: 'draw-dots'; points: Point2D[] }
   | { kind: 'draw-segment'; start: Point2D; current: Point2D }
@@ -169,9 +218,20 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   onUpdateRefPosition,
   onApplyTransform,
   onDeleteShape,
+  onDeleteShapes,
   onDeleteRef,
   onQuickAddAxis,
   onSelectTool,
+  onGroupSelected,
+  onUngroupSelected,
+  onJoinSelected,
+  onSplitSelected,
+  onTrimAtPoint,
+  onToggleCloseShape,
+  onDuplicateShapes,
+  onOpenTextModal,
+  blockFeedback,
+  onDismissBlockFeedback,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const svgRef = useRef<SVGSVGElement>(null);
@@ -187,6 +247,12 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
 
   const [drag, setDrag] = useState<DragInteraction | null>(null);
   const [pendingRefStart, setPendingRefStart] = useState<Point2D | null>(null);
+  const [pendingCurve, setPendingCurve] = useState<{
+    start: Point2D;
+    end?: Point2D;
+  } | null>(null);
+  const [pendingSpline, setPendingSpline] = useState<Point2D[]>([]);
+  const [trimHover, setTrimHover] = useState<TrimTargetInfo | null>(null);
 
   const [wizard, setWizard] = useState<TransformWizardState | null>(null);
 
@@ -233,6 +299,9 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   // Sync wizard when activeTool changes
   useEffect(() => {
     setPendingRefStart(null);
+    setPendingCurve(null);
+    setPendingSpline([]);
+    setTrimHover(null);
     if (isTransformTool(activeTool)) {
       const validSel = selectedShapeIds.filter((id) =>
         shapes.some((s) => s.id === id && s.visible)
@@ -252,6 +321,51 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       setWizard(null);
     }
   }, [activeTool]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const finishPendingSpline = useCallback(
+    (closed: boolean) => {
+      if (pendingSpline.length < (closed ? 3 : 2)) return;
+      const d = splinePointsToCubicPath(pendingSpline, closed);
+      onCreateShape(
+        {
+          kind: 'spline',
+          localPaths: [d],
+          matrix: IDENTITY_MATRIX,
+          fillColor: 'none',
+          strokeWidthMm: 0.35,
+          visible: true,
+        },
+        true
+      );
+      setPendingSpline([]);
+    },
+    [pendingSpline, onCreateShape]
+  );
+
+  // Enter finishes open spline; Escape cancels pending curve/spline
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (
+        target &&
+        (target.tagName === 'INPUT' ||
+          target.tagName === 'TEXTAREA' ||
+          target.tagName === 'SELECT')
+      ) {
+        return;
+      }
+      if (e.key === 'Enter' && activeTool === 'spline' && pendingSpline.length >= 2) {
+        e.preventDefault();
+        finishPendingSpline(false);
+      } else if (e.key === 'Escape') {
+        setPendingRefStart(null);
+        setPendingCurve(null);
+        setPendingSpline([]);
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [activeTool, pendingSpline.length, finishPendingSpline]);
 
   const basePxPerCm = useMemo(() => {
     const pad = 72;
@@ -298,27 +412,51 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     [grid.step, grid.snapToRefPoints, refPoints, pxPerCm]
   );
 
+  const isShapeVisuallyFilled = useCallback(
+    (s: DesignShape): boolean => {
+      if (s.kind === 'group' && s.children) {
+        return s.children.some((c) => c.visible && isShapeVisuallyFilled(c));
+      }
+      if (appMode === 'laser-prep') {
+        return getShapeLaserLayer(s) === 'engrave-fill';
+      }
+      if (viewMode !== 'paint') return false;
+      if (s.kind === 'tessellation') {
+        return Boolean(s.tessellation?.autoColor);
+      }
+      return isShapeFillable(s) && Boolean(s.fillColor) && s.fillColor !== 'none';
+    },
+    [appMode, viewMode]
+  );
+
   // Compute hit-testing in math coordinates
   const findShapeAt = useCallback(
-    (p: Point2D): DesignShape | null => {
-      const tol = 10 / pxPerCm;
+    (
+      p: Point2D,
+      preferDirect = false
+    ): { shape: DesignShape; hollowFallback: DesignShape | null } => {
+      const tol = 12 / pxPerCm;
+      let hollowFallback: DesignShape | null = null;
       for (let i = shapes.length - 1; i >= 0; i--) {
         const s = shapes[i];
         if (!s.visible) continue;
-        const b = getShapeMathBounds(s);
-        if (!b) continue;
+        const hitKind = hitTestShape(s, p, tol);
+        if (!hitKind) continue;
         if (
-          p.x >= b.minX - tol &&
-          p.x <= b.maxX + tol &&
-          p.y >= b.minY - tol &&
-          p.y <= b.maxY + tol
+          hitKind === 'stroke' ||
+          !preferDirect ||
+          isShapeVisuallyFilled(s) ||
+          selectedShapeIds.includes(s.id)
         ) {
-          return s;
+          return { shape: s, hollowFallback };
+        }
+        if (!hollowFallback) {
+          hollowFallback = s;
         }
       }
-      return null;
+      return { shape: null as unknown as DesignShape, hollowFallback };
     },
-    [shapes, pxPerCm]
+    [shapes, pxPerCm, isShapeVisuallyFilled, selectedShapeIds]
   );
 
   const findRefAt = useCallback(
@@ -415,11 +553,15 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
 
     // Mode 2: Laser Depth Classification clicks
     if (appMode === 'laser-prep') {
-      const shapeHit = findShapeAt(rawMath);
+      const { shape: shapeHit, hollowFallback } = findShapeAt(
+        rawMath,
+        laserTool !== 'brush'
+      );
       if (laserTool === 'brush') {
-        if (shapeHit && onAssignLayerToShapes) {
-          onAssignLayerToShapes([shapeHit.id], activeBrushLayer);
-          onSelectShapes([shapeHit.id]);
+        const targetHit = shapeHit ?? hollowFallback;
+        if (targetHit && onAssignLayerToShapes) {
+          onAssignLayerToShapes([targetHit.id], activeBrushLayer);
+          onSelectShapes([targetHit.id]);
         }
         return;
       }
@@ -432,9 +574,24 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         } else {
           onSelectShapes([shapeHit.id]);
         }
-      } else {
-        onSelectShapes([]);
+        return;
       }
+      setDrag({
+        kind: 'marquee-select',
+        startMath: rawMath,
+        currentMath: rawMath,
+        startClientX: e.clientX,
+        startClientY: e.clientY,
+        additive: e.shiftKey,
+        clickFallbackShapeId: hollowFallback?.id,
+      });
+      return;
+    }
+
+    // Trim tool (Scissors: erase only the sub-segment between intersections)
+    if (activeTool === 'trim') {
+      onTrimAtPoint?.(rawMath, 12 / pxPerCm);
+      setTrimHover(null);
       return;
     }
 
@@ -445,7 +602,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         onDeleteRef(refHit.id);
         return;
       }
-      const shapeHit = findShapeAt(rawMath);
+      const { shape: shapeHit } = findShapeAt(rawMath, false);
       if (shapeHit) {
         onDeleteShape(shapeHit.id);
       }
@@ -455,7 +612,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     // Transformation wizard clicks
     if (wizard) {
       if (wizard.step === 'pick-shape') {
-        const hit = findShapeAt(rawMath);
+        const { shape: hit } = findShapeAt(rawMath, false);
         if (hit) {
           onSelectShapes([hit.id]);
           setWizard({
@@ -569,6 +726,76 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       return;
     }
 
+    if (activeTool === 'text') {
+      onOpenTextModal?.(snap.point);
+      return;
+    }
+
+    if (activeTool === 'curve') {
+      if (!pendingCurve) {
+        setPendingCurve({ start: snap.point });
+      } else if (!pendingCurve.end) {
+        if (
+          Math.hypot(
+            snap.point.x - pendingCurve.start.x,
+            snap.point.y - pendingCurve.start.y
+          ) >= 0.08
+        ) {
+          setPendingCurve({ ...pendingCurve, end: snap.point });
+        }
+      } else {
+        const d = threePointCurveToQuadraticPath(
+          pendingCurve.start,
+          pendingCurve.end,
+          snap.point
+        );
+        onCreateShape(
+          {
+            kind: 'curve',
+            localPaths: [d],
+            matrix: IDENTITY_MATRIX,
+            fillColor: 'none',
+            strokeWidthMm: 0.35,
+            visible: true,
+          },
+          true
+        );
+        setPendingCurve(null);
+      }
+      return;
+    }
+
+    if (activeTool === 'spline') {
+      if (pendingSpline.length >= 3) {
+        const first = pendingSpline[0];
+        const closeTol = Math.max(0.12, 14 / pxPerCm);
+        if (Math.hypot(rawMath.x - first.x, rawMath.y - first.y) <= closeTol) {
+          const d = splinePointsToCubicPath(pendingSpline, true);
+          onCreateShape(
+            {
+              kind: 'spline',
+              localPaths: [d],
+              matrix: IDENTITY_MATRIX,
+              fillColor: 'none',
+              strokeWidthMm: 0.35,
+              visible: true,
+            },
+            true
+          );
+          setPendingSpline([]);
+          return;
+        }
+      }
+      const last = pendingSpline[pendingSpline.length - 1];
+      if (
+        !last ||
+        Math.hypot(snap.point.x - last.x, snap.point.y - last.y) >= 0.05
+      ) {
+        setPendingSpline((prev) => [...prev, snap.point]);
+      }
+      return;
+    }
+
     if (activeTool === 'freehand') {
       setDrag({ kind: 'draw-freehand', points: [rawMath] });
       return;
@@ -611,8 +838,8 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         return;
       }
 
-      // Check shape hit
-      const shapeHit = findShapeAt(rawMath);
+      // Check shape hit (prioritize stroke/filled hits; hollow interiors allow marquee dragging)
+      const { shape: shapeHit, hollowFallback } = findShapeAt(rawMath, true);
       if (shapeHit) {
         onSelectRef(null);
         let nextSel = selectedShapeIds;
@@ -649,16 +876,25 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       }
 
       // Check other ref (line/vector) just to select in panel
-      const anyRef = findRefAt(rawMath);
-      if (anyRef) {
-        onSelectRef(anyRef.id);
-        onSelectShapes([]);
-        return;
+      if (!hollowFallback) {
+        const anyRef = findRefAt(rawMath);
+        if (anyRef) {
+          onSelectRef(anyRef.id);
+          onSelectShapes([]);
+          return;
+        }
       }
 
-      // Empty click clears selection
-      onSelectShapes([]);
-      onSelectRef(null);
+      // Empty or hollow interior drag -> marquee selection box
+      setDrag({
+        kind: 'marquee-select',
+        startMath: rawMath,
+        currentMath: rawMath,
+        startClientX: e.clientX,
+        startClientY: e.clientY,
+        additive: e.shiftKey,
+        clickFallbackShapeId: hollowFallback?.id,
+      });
     }
   };
 
@@ -667,7 +903,14 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     const snap = computeSnap(rawMath);
     setSnappedCursor(snap);
 
-    if (!drag) return;
+    if (!drag) {
+      if (appMode === 'design' && activeTool === 'trim') {
+        setTrimHover(findTrimHoverTarget(shapes, rawMath, 12 / pxPerCm));
+      } else if (trimHover) {
+        setTrimHover(null);
+      }
+      return;
+    }
 
     if (drag.kind === 'pan') {
       const dxPx = e.clientX - drag.startClientX;
@@ -741,6 +984,11 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       return;
     }
 
+    if (drag.kind === 'marquee-select') {
+      setDrag({ ...drag, currentMath: rawMath });
+      return;
+    }
+
     if (drag.kind === 'draw-freehand') {
       const last = drag.points[drag.points.length - 1];
       if (!last || Math.hypot(rawMath.x - last.x, rawMath.y - last.y) >= 4 / pxPerCm) {
@@ -777,8 +1025,55 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     }
   };
 
-  const handlePointerUp = () => {
+  const handlePointerUp = (e: React.PointerEvent<SVGSVGElement>) => {
     if (!drag) return;
+
+    if (drag.kind === 'marquee-select') {
+      const distPx = Math.hypot(
+        e.clientX - drag.startClientX,
+        e.clientY - drag.startClientY
+      );
+      if (distPx < 4) {
+        if (drag.clickFallbackShapeId) {
+          onSelectRef(null);
+          if (drag.additive) {
+            const nextSel = selectedShapeIds.includes(drag.clickFallbackShapeId)
+              ? selectedShapeIds.filter((id) => id !== drag.clickFallbackShapeId)
+              : [...selectedShapeIds, drag.clickFallbackShapeId];
+            onSelectShapes(nextSel);
+          } else {
+            onSelectShapes([drag.clickFallbackShapeId]);
+          }
+        } else if (!drag.additive) {
+          onSelectShapes([]);
+          onSelectRef(null);
+        }
+      } else {
+        const rect = {
+          minX: Math.min(drag.startMath.x, drag.currentMath.x),
+          minY: Math.min(drag.startMath.y, drag.currentMath.y),
+          maxX: Math.max(drag.startMath.x, drag.currentMath.x),
+          maxY: Math.max(drag.startMath.y, drag.currentMath.y),
+        };
+        const hitIds = shapes
+          .filter(
+            (s) =>
+              s.visible &&
+              shapeIntersectsRect(s, rect, {
+                matchFilledInterior: isShapeVisuallyFilled(s),
+              })
+          )
+          .map((s) => s.id);
+        onSelectRef(null);
+        if (drag.additive) {
+          onSelectShapes(Array.from(new Set([...selectedShapeIds, ...hitIds])));
+        } else {
+          onSelectShapes(hitIds);
+        }
+      }
+      setDrag(null);
+      return;
+    }
 
     if (drag.kind === 'draw-freehand' && drag.points.length >= 2) {
       const d = pointsToSmoothCubicPath(drag.points, 0.04);
@@ -993,29 +1288,51 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
             };
 
     const result: { paths: string[]; dots?: Point2D[] }[] = [];
+    const appendGhost = (shape: DesignShape, m: Matrix2D) => {
+      if (!shape.visible) return;
+      if (shape.kind === 'group' && shape.children) {
+        for (const ch of shape.children) {
+          appendGhost(ch, multiplyMatrices(m, ch.matrix));
+        }
+        return;
+      }
+      if (shape.kind === 'dots' && shape.localDots) {
+        result.push({
+          paths: [],
+          dots: shape.localDots.map((pt) =>
+            mathToSvgMm(applyMatrix(m, pt), board.widthCm, board.heightCm)
+          ),
+        });
+      } else {
+        const lp = getShapeLocalPaths(shape);
+        result.push({
+          paths: lp.map(
+            (d) => transformMathPath(d, m, board.widthCm, board.heightCm).svgD
+          ),
+        });
+      }
+    };
+
     for (let c = 0; c < copiesCount; c++) {
       const opMat = buildTransformMatrixForParams(params, refs, c);
       for (const s of srcShapes) {
-        const m = multiplyMatrices(opMat, s.matrix);
-        if (s.kind === 'dots' && s.localDots) {
-          result.push({
-            paths: [],
-            dots: s.localDots.map((pt) =>
-              mathToSvgMm(applyMatrix(m, pt), board.widthCm, board.heightCm)
-            ),
-          });
-        } else {
-          const lp = getShapeLocalPaths(s);
-          result.push({
-            paths: lp.map(
-              (d) => transformMathPath(d, m, board.widthCm, board.heightCm).svgD
-            ),
-          });
-        }
+        appendGhost(s, multiplyMatrices(opMat, s.matrix));
       }
     }
     return result;
   }, [wizard, shapes, refs, board.widthCm, board.heightCm]);
+
+  const selectedShapes = useMemo(
+    () => shapes.filter((s) => selectedShapeIds.includes(s.id) && s.visible),
+    [shapes, selectedShapeIds]
+  );
+  const canGroup = canGroupShapes(selectedShapes);
+  const canUngroup = canUngroupShapes(selectedShapes);
+  const canJoin = canJoinShapes(selectedShapes);
+  const canSplit = canSplitShapes(selectedShapes, shapes);
+  const singleSelected = selectedShapes.length === 1 ? selectedShapes[0] : null;
+  const showToggleClose = singleSelected ? canToggleCloseShape(singleSelected) : false;
+  const singleIsClosed = singleSelected ? isShapeClosed(singleSelected) : false;
 
   const strokeScale = mmPerPx; // 1 screen pixel in mm
 
@@ -1078,14 +1395,148 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         </div>
       )}
 
+      {/* Block Feedback Toast Banner */}
+      {appMode === 'design' && blockFeedback && !wizard && (
+        <div className="absolute top-3 left-1/2 -translate-x-1/2 z-30 max-w-[92%] flex items-center gap-2 bg-slate-900 text-white shadow-xl rounded-xl px-3.5 py-2 text-xs">
+          <span className="font-medium">{blockFeedback}</span>
+          {onDismissBlockFeedback && (
+            <button
+              type="button"
+              onClick={onDismissBlockFeedback}
+              className="p-0.5 rounded hover:bg-white/15 cursor-pointer"
+              title="Cerrar aviso"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* Contextual Selection & Block Actions Bar */}
+      {appMode === 'design' &&
+        !wizard &&
+        !blockFeedback &&
+        activeTool === 'select' &&
+        selectedShapes.length > 0 && (
+          <div className="absolute top-3 left-1/2 -translate-x-1/2 z-20 max-w-[92%] flex flex-wrap items-center justify-center gap-1.5 bg-white/95 backdrop-blur-xs border border-indigo-200 shadow-lg rounded-xl px-3 py-1.5 text-xs">
+            <span className="text-[11px] font-bold text-slate-800 pr-1">
+              {selectedShapes.length === 1 && singleSelected?.kind === 'group'
+                ? `${singleSelected.name} (${getGroupLeafStats(singleSelected).leafCount} elem.)`
+                : selectedShapes.length === 1
+                  ? singleSelected?.name
+                  : `${selectedShapes.length} seleccionados`}
+            </span>
+
+            {canGroup && onGroupSelected && (
+              <button
+                type="button"
+                onClick={onGroupSelected}
+                title="Agrupar selección en un bloque conjunto (Ctrl+G)"
+                className="px-2 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white font-semibold text-[11px] flex items-center gap-1 cursor-pointer transition"
+              >
+                <Group className="w-3.5 h-3.5" />
+                <span>Agrupar en bloque</span>
+              </button>
+            )}
+
+            {canJoin && onJoinSelected && (
+              <button
+                type="button"
+                onClick={onJoinSelected}
+                title="Unir líneas conectadas en una sola figura cerrada rellenable (Ctrl+J)"
+                className="px-2 py-1 rounded-lg bg-violet-600 hover:bg-violet-700 text-white font-semibold text-[11px] flex items-center gap-1 cursor-pointer transition"
+              >
+                <Combine className="w-3.5 h-3.5" />
+                <span>Unir trazos</span>
+              </button>
+            )}
+
+            {canSplit && onSplitSelected && (
+              <button
+                type="button"
+                onClick={onSplitSelected}
+                title="Dividir en trazos individuales o por sus intersecciones para borrar partes por separado (Ctrl+Shift+J)"
+                className="px-2 py-1 rounded-lg bg-rose-50 hover:bg-rose-100 text-rose-800 border border-rose-200 font-semibold text-[11px] flex items-center gap-1 cursor-pointer transition"
+              >
+                <Split className="w-3.5 h-3.5" />
+                <span>Dividir</span>
+              </button>
+            )}
+
+            {canUngroup && onUngroupSelected && (
+              <button
+                type="button"
+                onClick={onUngroupSelected}
+                title="Desagrupar bloque en sus elementos originales (Ctrl+Shift+G)"
+                className="px-2 py-1 rounded-lg bg-amber-100 hover:bg-amber-200 text-amber-900 border border-amber-300 font-semibold text-[11px] flex items-center gap-1 cursor-pointer transition"
+              >
+                <Ungroup className="w-3.5 h-3.5" />
+                <span>Desagrupar</span>
+              </button>
+            )}
+
+            {showToggleClose && singleSelected && onToggleCloseShape && (
+              <button
+                type="button"
+                onClick={() => onToggleCloseShape(singleSelected.id)}
+                title={
+                  singleIsClosed
+                    ? 'Abrir el contorno para editarlo como línea abierta'
+                    : 'Cerrar el contorno conectando inicio y fin para poder pintarlo'
+                }
+                className="px-2 py-1 rounded-lg bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200 font-semibold text-[11px] flex items-center gap-1 cursor-pointer transition"
+              >
+                <Pentagon className="w-3.5 h-3.5" />
+                <span>{singleIsClosed ? 'Abrir contorno' : 'Cerrar contorno'}</span>
+              </button>
+            )}
+
+            {onDuplicateShapes && (
+              <button
+                type="button"
+                onClick={() => onDuplicateShapes(selectedShapeIds)}
+                title="Duplicar selección (Ctrl+D)"
+                className="p-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 cursor-pointer transition"
+              >
+                <Copy className="w-3.5 h-3.5" />
+              </button>
+            )}
+
+            <button
+              type="button"
+              onClick={() =>
+                onDeleteShapes
+                  ? onDeleteShapes(selectedShapeIds)
+                  : selectedShapeIds.forEach((id) => onDeleteShape(id))
+              }
+              title="Eliminar selección (Supr)"
+              className="p-1.5 rounded-lg bg-rose-50 hover:bg-rose-100 text-rose-600 cursor-pointer transition"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        )}
+
       {/* Top Guidance Banner for Multi-Step Tools & Isometric Transformations */}
       {appMode === 'design' &&
         (wizard ||
           activeTool === 'ref-line' ||
           activeTool === 'ref-vector' ||
           activeTool === 'preset' ||
-          mirrorSymmetry > 1) && (
+          activeTool === 'curve' ||
+          activeTool === 'spline' ||
+          activeTool === 'text' ||
+          activeTool === 'trim' ||
+          (mirrorSymmetry > 1 &&
+            (activeTool === 'freehand' ||
+              activeTool === 'dots' ||
+              activeTool === 'segment'))) && (
         <div className="absolute top-3 left-1/2 -translate-x-1/2 z-20 max-w-[92%] flex flex-wrap items-center justify-center gap-2 bg-white/95 backdrop-blur-xs border border-slate-200 shadow-lg rounded-xl px-3.5 py-2 text-xs">
+          {!wizard && activeTool === 'trim' && (
+            <span className="text-rose-700 font-medium">
+              ✂️ <strong>Recortar tramo:</strong> Pasa el mouse sobre la parte de la línea o intersección que no quieras y haz clic para borrar solo ese tramo.
+            </span>
+          )}
           {!wizard && activeTool === 'preset' && (
             <span className="text-slate-700 font-medium">
               Estampa seleccionada:{' '}
@@ -1094,6 +1545,90 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
               </strong>{' '}
               — Haz clic en el lienzo para colocarla (con imán a la cuadrícula).
             </span>
+          )}
+
+          {!wizard && activeTool === 'text' && (
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-slate-700 font-medium">
+                Texto vectorial: Haz clic en el tablero donde quieras colocarlo, o
+              </span>
+              <button
+                type="button"
+                onClick={() => onOpenTextModal?.({ x: 0, y: 0 })}
+                className="px-2.5 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white font-semibold text-[11px] cursor-pointer"
+              >
+                Escribir en (0, 0)
+              </button>
+            </div>
+          )}
+
+          {!wizard && activeTool === 'curve' && (
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-slate-700 font-medium">
+                {!pendingCurve
+                  ? 'Curva de 3 puntos (Paso 1): Haz clic en el punto inicial.'
+                  : !pendingCurve.end
+                    ? 'Curva (Paso 2): Haz clic en el punto final.'
+                    : 'Curva (Paso 3): Mueve el mouse para darle la curva exacta y haz clic para fijarla.'}
+              </span>
+              {pendingCurve && (
+                <button
+                  type="button"
+                  onClick={() => setPendingCurve(null)}
+                  className="px-2 py-0.5 rounded bg-slate-100 hover:bg-slate-200 text-slate-700 text-[11px] font-medium cursor-pointer"
+                >
+                  Reiniciar
+                </button>
+              )}
+            </div>
+          )}
+
+          {!wizard && activeTool === 'spline' && (
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-slate-700 font-medium">
+                {pendingSpline.length === 0
+                  ? 'Curva continua: Haz clic punto por punto para trazar curvas suaves.'
+                  : pendingSpline.length < 3
+                    ? `Curva continua (${pendingSpline.length} puntos): Sigue haciendo clic o doble clic para terminar.`
+                    : `Curva continua (${pendingSpline.length} puntos): Haz clic en el punto inicial para cerrarla o usa:`}
+              </span>
+              {pendingSpline.length >= 2 && (
+                <button
+                  type="button"
+                  onClick={() => finishPendingSpline(false)}
+                  className="px-2 py-0.5 rounded bg-indigo-600 hover:bg-indigo-700 text-white text-[11px] font-semibold cursor-pointer"
+                >
+                  Terminar abierta
+                </button>
+              )}
+              {pendingSpline.length >= 3 && (
+                <button
+                  type="button"
+                  onClick={() => finishPendingSpline(true)}
+                  className="px-2 py-0.5 rounded bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-semibold cursor-pointer"
+                >
+                  Cerrar figura
+                </button>
+              )}
+              {pendingSpline.length >= 1 && (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => setPendingSpline((prev) => prev.slice(0, -1))}
+                    className="px-2 py-0.5 rounded bg-slate-100 hover:bg-slate-200 text-slate-700 text-[11px] font-medium cursor-pointer"
+                  >
+                    Deshacer punto
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setPendingSpline([])}
+                    className="px-2 py-0.5 rounded text-rose-600 hover:bg-rose-50 text-[11px] font-medium cursor-pointer"
+                  >
+                    Cancelar
+                  </button>
+                </>
+              )}
+            </div>
           )}
 
           {!wizard && activeTool === 'ref-line' && (
@@ -1117,7 +1652,10 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
             (activeTool === 'freehand' ||
               activeTool === 'dots' ||
               activeTool === 'segment' ||
-              activeTool === 'preset') && (
+              activeTool === 'curve' ||
+              activeTool === 'spline' ||
+              activeTool === 'preset' ||
+              activeTool === 'text') && (
               <span className="text-violet-700 font-semibold">
                 ✨ Espejo radial {mirrorSymmetry}× activo alrededor de (0, 0)
               </span>
@@ -1412,6 +1950,11 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
         onPointerCancel={handlePointerUp}
+        onDoubleClick={() => {
+          if (activeTool === 'spline' && pendingSpline.length >= 2) {
+            finishPendingSpline(false);
+          }
+        }}
         style={{ cursor: cursorStyle, touchAction: 'none' }}
         className="w-full h-full block"
       >
@@ -1595,205 +2138,242 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
 
         {/* Design Shapes (Engraving Layer) */}
         <g strokeLinecap="round" strokeLinejoin="round">
-          {shapes.map((shape) => {
-            if (!shape.visible) return null;
-            const isSel = selectedShapeIds.includes(shape.id);
-            const isWizSrc = wizard?.sourceIds.includes(shape.id);
-            const shapeLayerId = getShapeLaserLayer(shape);
-            const layerDef = LASER_LAYER_MAP[shapeLayerId];
-            const isLaserPrep = appMode === 'laser-prep';
-            const isWood = isLaserPrep && laserPreviewStyle === 'wood';
+          {(() => {
+            const renderShapeSvg = (
+              shape: DesignShape,
+              parentMatrix: Matrix2D,
+              inheritedLayer: LaserDepthId | undefined,
+              isSel: boolean,
+              isWizSrc: boolean
+            ): React.ReactNode => {
+              if (!shape.visible) return null;
+              const worldMatrix = multiplyMatrices(parentMatrix, shape.matrix);
+              const effectiveLayer = shape.laserLayer ?? inheritedLayer;
 
-            if (shape.kind === 'dots' && shape.localDots) {
-              const rMm = (shape.dotRadiusCm ?? 0.08) * 10;
-              const sx = Math.hypot(shape.matrix[0], shape.matrix[1]);
-              const sy = Math.hypot(shape.matrix[2], shape.matrix[3]);
-              const scaledRMm = Math.max(0.3, rMm * ((sx + sy) / 2));
-              const dotColor = isWizSrc
+              if (shape.kind === 'group' && shape.children) {
+                return (
+                  <g key={shape.id}>
+                    {shape.children.map((child) =>
+                      renderShapeSvg(child, worldMatrix, effectiveLayer, isSel, isWizSrc)
+                    )}
+                  </g>
+                );
+              }
+
+              const shapeLayerId = effectiveLayer ?? 'engrave-medium';
+              const layerDef = LASER_LAYER_MAP[shapeLayerId];
+              const isLaserPrep = appMode === 'laser-prep';
+              const isWood = isLaserPrep && laserPreviewStyle === 'wood';
+
+              if (shape.kind === 'dots' && shape.localDots) {
+                const rMm = (shape.dotRadiusCm ?? 0.08) * 10;
+                const sx = Math.hypot(worldMatrix[0], worldMatrix[1]);
+                const sy = Math.hypot(worldMatrix[2], worldMatrix[3]);
+                const scaledRMm = Math.max(0.3, rMm * ((sx + sy) / 2));
+                const dotColor = isWizSrc
+                  ? '#059669'
+                  : isLaserPrep
+                    ? isWood
+                      ? layerDef.woodPreviewColor
+                      : layerDef.color
+                    : isSel && activeTool === 'select'
+                      ? '#1d4ed8'
+                      : '#0f172a';
+                return (
+                  <g key={shape.id}>
+                    {shape.localDots.map((dot, idx) => {
+                      const sp = mathToSvgMm(
+                        applyMatrix(worldMatrix, dot),
+                        board.widthCm,
+                        board.heightCm
+                      );
+                      return (
+                        <circle
+                          key={idx}
+                          cx={sp.x}
+                          cy={sp.y}
+                          r={scaledRMm}
+                          fill={dotColor}
+                        />
+                      );
+                    })}
+                  </g>
+                );
+              }
+
+              if (shape.kind === 'tessellation' && shape.tessellation) {
+                const baseSw = Math.max(shape.strokeWidthMm, 1.3 * strokeScale);
+                const showTessPaint =
+                  !isLaserPrep && viewMode === 'paint' && shape.tessellation.autoColor;
+                const hw = shape.tessellation.widthCm / 2;
+                const hh = shape.tessellation.heightCm / 2;
+                const borderPts = [
+                  { x: -hw, y: -hh },
+                  { x: hw, y: -hh },
+                  { x: hw, y: hh },
+                  { x: -hw, y: hh },
+                ].map((pt) =>
+                  mathToSvgMm(
+                    applyMatrix(worldMatrix, pt),
+                    board.widthCm,
+                    board.heightCm
+                  )
+                );
+
+                return (
+                  <g key={shape.id}>
+                    {shape.tessellation.tiles.map((tile, idx) => {
+                      const ptsStr = tile.points
+                        .map((pt) => {
+                          const sp = mathToSvgMm(
+                            applyMatrix(worldMatrix, pt),
+                            board.widthCm,
+                            board.heightCm
+                          );
+                          return `${sp.x},${sp.y}`;
+                        })
+                        .join(' ');
+                      const roleLayerId =
+                        shape.tessellation?.roleLaserLayers?.[tile.role] ?? shapeLayerId;
+                      const roleDef = LASER_LAYER_MAP[roleLayerId];
+                      const tileStroke = isWizSrc
+                        ? '#059669'
+                        : isLaserPrep
+                          ? isWood
+                            ? roleDef.woodPreviewColor
+                            : roleDef.color
+                          : isSel && activeTool === 'select'
+                            ? '#1d4ed8'
+                            : '#000000';
+                      const tileFill = isLaserPrep
+                        ? roleLayerId === 'engrave-fill'
+                          ? isWood
+                            ? roleDef.woodPreviewColor
+                            : roleDef.color
+                          : 'none'
+                        : showTessPaint
+                          ? tile.fillColor
+                          : 'none';
+                      const tileSw = isLaserPrep
+                        ? baseSw * roleDef.woodStrokeWidthFactor
+                        : baseSw;
+
+                      return (
+                        <polygon
+                          key={idx}
+                          points={ptsStr}
+                          fill={tileFill}
+                          fillOpacity={isLaserPrep ? (isWood ? 0.85 : 0.78) : 0.72}
+                          stroke={tileStroke}
+                          strokeWidth={tileSw}
+                          strokeLinejoin="round"
+                        />
+                      );
+                    })}
+                    {shape.tessellation.includeBorder &&
+                      (() => {
+                        const bLayerId =
+                          shape.tessellation?.borderLaserLayer ?? shapeLayerId;
+                        const bDef = LASER_LAYER_MAP[bLayerId];
+                        const bStroke = isWizSrc
+                          ? '#059669'
+                          : isLaserPrep
+                            ? isWood
+                              ? bDef.woodPreviewColor
+                              : bDef.color
+                            : isSel && activeTool === 'select'
+                              ? '#1d4ed8'
+                              : '#000000';
+                        return (
+                          <polygon
+                            points={borderPts.map((p) => `${p.x},${p.y}`).join(' ')}
+                            fill="none"
+                            stroke={bStroke}
+                            strokeWidth={
+                              isLaserPrep
+                                ? baseSw * bDef.woodStrokeWidthFactor
+                                : baseSw * 1.25
+                            }
+                            strokeLinejoin="round"
+                          />
+                        );
+                      })()}
+                  </g>
+                );
+              }
+
+              const localPaths = getShapeLocalPaths(shape);
+              const showPaint =
+                !isLaserPrep &&
+                viewMode === 'paint' &&
+                isShapeFillable(shape) &&
+                shape.fillColor &&
+                shape.fillColor !== 'none';
+              const isLayerFill = isLaserPrep && shapeLayerId === 'engrave-fill';
+              const strokeColor = isWizSrc
                 ? '#059669'
                 : isLaserPrep
                   ? isWood
                     ? layerDef.woodPreviewColor
                     : layerDef.color
-                  : '#0f172a';
+                  : isSel && activeTool === 'select'
+                    ? '#1d4ed8'
+                    : '#000000';
+              const sw = isLaserPrep
+                ? Math.max(shape.strokeWidthMm, 1.4 * strokeScale) *
+                  layerDef.woodStrokeWidthFactor
+                : Math.max(shape.strokeWidthMm, 1.4 * strokeScale);
+
               return (
                 <g key={shape.id}>
-                  {shape.localDots.map((dot, idx) => {
-                    const sp = mathToSvgMm(
-                      applyMatrix(shape.matrix, dot),
+                  {localPaths.map((d, idx) => {
+                    const { svgD } = transformMathPath(
+                      d,
+                      worldMatrix,
                       board.widthCm,
                       board.heightCm
                     );
-                    return (
-                      <circle
-                        key={idx}
-                        cx={sp.x}
-                        cy={sp.y}
-                        r={scaledRMm}
-                        fill={dotColor}
-                      />
-                    );
-                  })}
-                </g>
-              );
-            }
-
-            if (shape.kind === 'tessellation' && shape.tessellation) {
-              const baseSw = Math.max(shape.strokeWidthMm, 1.3 * strokeScale);
-              const showTessPaint =
-                !isLaserPrep && viewMode === 'paint' && shape.tessellation.autoColor;
-              const hw = shape.tessellation.widthCm / 2;
-              const hh = shape.tessellation.heightCm / 2;
-              const borderPts = [
-                { x: -hw, y: -hh },
-                { x: hw, y: -hh },
-                { x: hw, y: hh },
-                { x: -hw, y: hh },
-              ].map((pt) =>
-                mathToSvgMm(
-                  applyMatrix(shape.matrix, pt),
-                  board.widthCm,
-                  board.heightCm
-                )
-              );
-
-              return (
-                <g key={shape.id}>
-                  {shape.tessellation.tiles.map((tile, idx) => {
-                    const ptsStr = tile.points
-                      .map((pt) => {
-                        const sp = mathToSvgMm(
-                          applyMatrix(shape.matrix, pt),
-                          board.widthCm,
-                          board.heightCm
-                        );
-                        return `${sp.x},${sp.y}`;
-                      })
-                      .join(' ');
-                    const roleLayerId =
-                      shape.tessellation?.roleLaserLayers?.[tile.role] ?? shapeLayerId;
-                    const roleDef = LASER_LAYER_MAP[roleLayerId];
-                    const tileStroke = isWizSrc
-                      ? '#059669'
-                      : isLaserPrep
+                    if (!svgD) return null;
+                    const isClosed = d.trim().toUpperCase().endsWith('Z');
+                    const fillThisPath =
+                      showPaint && (shape.kind === 'preset' ? idx === 0 : isClosed);
+                    const fill = isLayerFill
+                      ? isClosed
                         ? isWood
-                          ? roleDef.woodPreviewColor
-                          : roleDef.color
-                        : isSel && activeTool === 'select'
-                          ? '#1d4ed8'
-                          : '#000000';
-                    const tileFill = isLaserPrep
-                      ? roleLayerId === 'engrave-fill'
-                        ? isWood
-                          ? roleDef.woodPreviewColor
-                          : roleDef.color
+                          ? layerDef.woodPreviewColor
+                          : layerDef.color
                         : 'none'
-                      : showTessPaint
-                        ? tile.fillColor
+                      : fillThisPath
+                        ? shape.fillColor
                         : 'none';
-                    const tileSw = isLaserPrep
-                      ? baseSw * roleDef.woodStrokeWidthFactor
-                      : baseSw;
-
                     return (
-                      <polygon
+                      <path
                         key={idx}
-                        points={ptsStr}
-                        fill={tileFill}
-                        fillOpacity={isLaserPrep ? (isWood ? 0.85 : 0.78) : 0.72}
-                        stroke={tileStroke}
-                        strokeWidth={tileSw}
-                        strokeLinejoin="round"
+                        d={svgD}
+                        fill={fill}
+                        fillRule="evenodd"
+                        fillOpacity={isLayerFill ? (isWood ? 0.85 : 0.78) : 0.72}
+                        stroke={strokeColor}
+                        strokeWidth={sw}
                       />
                     );
                   })}
-                  {shape.tessellation.includeBorder && (() => {
-                    const bLayerId =
-                      shape.tessellation?.borderLaserLayer ?? shapeLayerId;
-                    const bDef = LASER_LAYER_MAP[bLayerId];
-                    const bStroke = isWizSrc
-                      ? '#059669'
-                      : isLaserPrep
-                        ? isWood
-                          ? bDef.woodPreviewColor
-                          : bDef.color
-                        : isSel && activeTool === 'select'
-                          ? '#1d4ed8'
-                          : '#000000';
-                    return (
-                      <polygon
-                        points={borderPts.map((p) => `${p.x},${p.y}`).join(' ')}
-                        fill="none"
-                        stroke={bStroke}
-                        strokeWidth={
-                          isLaserPrep
-                            ? baseSw * bDef.woodStrokeWidthFactor
-                            : baseSw * 1.25
-                        }
-                        strokeLinejoin="round"
-                      />
-                    );
-                  })()}
                 </g>
               );
-            }
+            };
 
-            const localPaths = getShapeLocalPaths(shape);
-            const showPaint =
-              !isLaserPrep &&
-              viewMode === 'paint' &&
-              isShapeFillable(shape) &&
-              shape.fillColor &&
-              shape.fillColor !== 'none';
-            const isLayerFill = isLaserPrep && shapeLayerId === 'engrave-fill';
-            const strokeColor = isWizSrc
-              ? '#059669'
-              : isLaserPrep
-                ? isWood
-                  ? layerDef.woodPreviewColor
-                  : layerDef.color
-                : isSel && activeTool === 'select'
-                  ? '#1d4ed8'
-                  : '#000000';
-            const sw = isLaserPrep
-              ? Math.max(shape.strokeWidthMm, 1.4 * strokeScale) *
-                layerDef.woodStrokeWidthFactor
-              : Math.max(shape.strokeWidthMm, 1.4 * strokeScale);
-
-            return (
-              <g key={shape.id}>
-                {localPaths.map((d, idx) => {
-                  const { svgD } = transformMathPath(
-                    d,
-                    shape.matrix,
-                    board.widthCm,
-                    board.heightCm
-                  );
-                  if (!svgD) return null;
-                  const isClosed = d.trim().toUpperCase().endsWith('Z');
-                  const fill = isLayerFill
-                    ? isClosed
-                      ? isWood
-                        ? layerDef.woodPreviewColor
-                        : layerDef.color
-                      : 'none'
-                    : showPaint && idx === 0
-                      ? shape.fillColor
-                      : 'none';
-                  return (
-                    <path
-                      key={idx}
-                      d={svgD}
-                      fill={fill}
-                      fillOpacity={isLayerFill ? (isWood ? 0.85 : 0.78) : 0.72}
-                      stroke={strokeColor}
-                      strokeWidth={sw}
-                    />
-                  );
-                })}
-              </g>
-            );
-          })}
+            return shapes.map((shape) => {
+              const isSel = selectedShapeIds.includes(shape.id);
+              const isWizSrc = Boolean(wizard?.sourceIds.includes(shape.id));
+              return renderShapeSvg(
+                shape,
+                IDENTITY_MATRIX,
+                undefined,
+                isSel,
+                isWizSrc
+              );
+            });
+          })()}
         </g>
 
         {/* Ghost Preview for Rotation / Rosette / Translation */}
@@ -2077,6 +2657,143 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
           />
         )}
 
+        {/* Pending 3-Point Curve Preview */}
+        {activeTool === 'curve' && pendingCurve && (
+          <g pointerEvents="none">
+            {(() => {
+              const p1Mm = mathToSvgMm(
+                pendingCurve.start,
+                board.widthCm,
+                board.heightCm
+              );
+              if (!pendingCurve.end) {
+                const p2Mm = mathToSvgMm(
+                  snappedCursor.point,
+                  board.widthCm,
+                  board.heightCm
+                );
+                return (
+                  <>
+                    <line
+                      x1={p1Mm.x}
+                      y1={p1Mm.y}
+                      x2={p2Mm.x}
+                      y2={p2Mm.y}
+                      stroke="#4f46e5"
+                      strokeDasharray={`${5 * strokeScale} ${3 * strokeScale}`}
+                      strokeWidth={1.6 * strokeScale}
+                    />
+                    <circle cx={p1Mm.x} cy={p1Mm.y} r={4 * strokeScale} fill="#4f46e5" />
+                  </>
+                );
+              }
+              const p2Mm = mathToSvgMm(
+                pendingCurve.end,
+                board.widthCm,
+                board.heightCm
+              );
+              const previewD = threePointCurveToQuadraticPath(
+                pendingCurve.start,
+                pendingCurve.end,
+                snappedCursor.point
+              );
+              const { svgD } = transformMathPath(
+                previewD,
+                IDENTITY_MATRIX,
+                board.widthCm,
+                board.heightCm
+              );
+              return (
+                <>
+                  <line
+                    x1={p1Mm.x}
+                    y1={p1Mm.y}
+                    x2={p2Mm.x}
+                    y2={p2Mm.y}
+                    stroke="#94a3b8"
+                    strokeDasharray={`${4 * strokeScale} ${3 * strokeScale}`}
+                    strokeWidth={1 * strokeScale}
+                  />
+                  <path
+                    d={svgD}
+                    fill="none"
+                    stroke="#4f46e5"
+                    strokeWidth={1.8 * strokeScale}
+                    strokeLinecap="round"
+                  />
+                  <circle cx={p1Mm.x} cy={p1Mm.y} r={4 * strokeScale} fill="#4f46e5" />
+                  <circle cx={p2Mm.x} cy={p2Mm.y} r={4 * strokeScale} fill="#4f46e5" />
+                </>
+              );
+            })()}
+          </g>
+        )}
+
+        {/* Pending Multi-Point Continuous Spline Preview */}
+        {activeTool === 'spline' && pendingSpline.length >= 1 && (
+          <g pointerEvents="none">
+            {(() => {
+              const first = pendingSpline[0];
+              const closeTol = Math.max(0.12, 14 / pxPerCm);
+              const hoveringClose =
+                pendingSpline.length >= 3 &&
+                Math.hypot(
+                  snappedCursor.point.x - first.x,
+                  snappedCursor.point.y - first.y
+                ) <= closeTol;
+              const previewPts = hoveringClose
+                ? pendingSpline
+                : [...pendingSpline, snappedCursor.point];
+              const previewD = splinePointsToCubicPath(previewPts, hoveringClose);
+              const { svgD } = transformMathPath(
+                previewD,
+                IDENTITY_MATRIX,
+                board.widthCm,
+                board.heightCm
+              );
+              const firstMm = mathToSvgMm(first, board.widthCm, board.heightCm);
+              return (
+                <>
+                  {svgD && (
+                    <path
+                      d={svgD}
+                      fill={hoveringClose ? 'rgba(16, 185, 129, 0.12)' : 'none'}
+                      stroke={hoveringClose ? '#059669' : '#4f46e5'}
+                      strokeWidth={1.8 * strokeScale}
+                      strokeLinecap="round"
+                    />
+                  )}
+                  {pendingSpline.map((pt, idx) => {
+                    const pm = mathToSvgMm(pt, board.widthCm, board.heightCm);
+                    return (
+                      <circle
+                        key={idx}
+                        cx={pm.x}
+                        cy={pm.y}
+                        r={(idx === 0 ? 4.5 : 3.2) * strokeScale}
+                        fill={idx === 0 && pendingSpline.length >= 3 ? '#10b981' : '#4f46e5'}
+                        stroke="#ffffff"
+                        strokeWidth={1.2 * strokeScale}
+                      />
+                    );
+                  })}
+                  {pendingSpline.length >= 3 && (
+                    <circle
+                      cx={firstMm.x}
+                      cy={firstMm.y}
+                      r={(hoveringClose ? 9 : 7) * strokeScale}
+                      fill="none"
+                      stroke="#10b981"
+                      strokeWidth={1.4 * strokeScale}
+                      strokeDasharray={`${3 * strokeScale} ${2 * strokeScale}`}
+                    />
+                  )}
+                </>
+              );
+            })()}
+          </g>
+        )}
+
         {/* Pending Reference Line/Vector Preview */}
         {pendingRefStart && (activeTool === 'ref-line' || activeTool === 'ref-vector') && (
           <g pointerEvents="none">
@@ -2205,9 +2922,85 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
           </g>
         )}
 
+        {/* Marquee Box Selection Overlay */}
+        {drag?.kind === 'marquee-select' &&
+          (Math.abs(drag.currentMath.x - drag.startMath.x) > 0.02 ||
+            Math.abs(drag.currentMath.y - drag.startMath.y) > 0.02) && (
+            <g pointerEvents="none">
+              {(() => {
+                const a = mathToSvgMm(
+                  {
+                    x: Math.min(drag.startMath.x, drag.currentMath.x),
+                    y: Math.max(drag.startMath.y, drag.currentMath.y),
+                  },
+                  board.widthCm,
+                  board.heightCm
+                );
+                const b = mathToSvgMm(
+                  {
+                    x: Math.max(drag.startMath.x, drag.currentMath.x),
+                    y: Math.min(drag.startMath.y, drag.currentMath.y),
+                  },
+                  board.widthCm,
+                  board.heightCm
+                );
+                return (
+                  <rect
+                    x={a.x}
+                    y={a.y}
+                    width={Math.max(0.5, b.x - a.x)}
+                    height={Math.max(0.5, b.y - a.y)}
+                    fill="rgba(59, 130, 246, 0.12)"
+                    stroke="#2563eb"
+                    strokeWidth={1.3 * strokeScale}
+                    strokeDasharray={`${4 * strokeScale} ${3 * strokeScale}`}
+                  />
+                );
+              })()}
+            </g>
+          )}
+
+        {/* Trim Hover Preview Overlay (Red Highlight on Targeted Sub-Segment) */}
+        {appMode === 'design' && activeTool === 'trim' && trimHover && (
+          <g pointerEvents="none">
+            {(() => {
+              const { svgD } = transformMathPath(
+                trimHover.previewPathD,
+                IDENTITY_MATRIX,
+                board.widthCm,
+                board.heightCm
+              );
+              if (!svgD) return null;
+              return (
+                <>
+                  <path
+                    d={svgD}
+                    fill="none"
+                    stroke="#fecdd3"
+                    strokeWidth={7 * strokeScale}
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                  <path
+                    d={svgD}
+                    fill="none"
+                    stroke="#dc2626"
+                    strokeWidth={3.2 * strokeScale}
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </>
+              );
+            })()}
+          </g>
+        )}
+
         {/* Magnetic Snap Indicator */}
         {appMode === 'design' &&
-        ((activeTool !== 'select' && activeTool !== 'pan') ||
+        ((activeTool !== 'select' &&
+          activeTool !== 'pan' &&
+          activeTool !== 'eraser' &&
+          activeTool !== 'trim') ||
           drag?.kind === 'move-ref-point') ? (
           <g pointerEvents="none">
             {(() => {

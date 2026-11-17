@@ -243,6 +243,51 @@ export function pointsToSmoothCubicPath(rawPoints: Point2D[], toleranceCm = 0.05
   return d;
 }
 
+/**
+ * Quadratic Bezier passing exactly through `through` at t = 0.5 between `start` and `end`.
+ */
+export function threePointCurveToQuadraticPath(
+  start: Point2D,
+  end: Point2D,
+  through: Point2D
+): string {
+  const cx = 2 * through.x - 0.5 * (start.x + end.x);
+  const cy = 2 * through.y - 0.5 * (start.y + end.y);
+  return `M ${roundCoord(start.x)} ${roundCoord(start.y)} Q ${roundCoord(cx)} ${roundCoord(cy)} ${roundCoord(end.x)} ${roundCoord(end.y)}`;
+}
+
+/**
+ * Smooth Catmull-Rom cubic Bezier spline preserving exact anchor points (open or closed).
+ */
+export function splinePointsToCubicPath(pts: Point2D[], closed = false): string {
+  const n = pts.length;
+  if (n === 0) return '';
+  if (n === 1) {
+    return `M ${roundCoord(pts[0].x)} ${roundCoord(pts[0].y)}`;
+  }
+  if (n === 2 && !closed) {
+    return `M ${roundCoord(pts[0].x)} ${roundCoord(pts[0].y)} L ${roundCoord(pts[1].x)} ${roundCoord(pts[1].y)}`;
+  }
+
+  let d = `M ${roundCoord(pts[0].x)} ${roundCoord(pts[0].y)}`;
+  const segCount = closed ? n : n - 1;
+  for (let i = 0; i < segCount; i++) {
+    const p0 = closed ? pts[(i - 1 + n) % n] : pts[Math.max(0, i - 1)];
+    const p1 = pts[i];
+    const p2 = pts[(i + 1) % n];
+    const p3 = closed ? pts[(i + 2) % n] : pts[Math.min(n - 1, i + 2)];
+
+    const cp1x = p1.x + (p2.x - p0.x) / 6;
+    const cp1y = p1.y + (p2.y - p0.y) / 6;
+    const cp2x = p2.x - (p3.x - p1.x) / 6;
+    const cp2y = p2.y - (p3.y - p1.y) / 6;
+
+    d += ` C ${roundCoord(cp1x)} ${roundCoord(cp1y)} ${roundCoord(cp2x)} ${roundCoord(cp2y)} ${roundCoord(p2.x)} ${roundCoord(p2.y)}`;
+  }
+  if (closed) d += ' Z';
+  return d;
+}
+
 export function sampleDotsAlongPoints(rawPoints: Point2D[], spacingCm = 0.35): Point2D[] {
   if (rawPoints.length === 0) return [];
   const dots: Point2D[] = [{ x: roundCoord(rawPoints[0].x), y: roundCoord(rawPoints[0].y) }];
